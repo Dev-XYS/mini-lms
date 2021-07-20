@@ -129,7 +129,7 @@ trait lms {
 
 }
 
-object Main extends lms {
+object Main_Legacy extends lms {
   def main(args: Array[String]): Unit = {
     val e_ack =
       Let(
