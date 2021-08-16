@@ -1,6 +1,6 @@
 package lms
 
-trait lms {
+trait lms_1 {
 
   trait Exp {}
 
@@ -129,7 +129,7 @@ trait lms {
 
 }
 
-object Main_Legacy extends lms {
+object Main_1 extends lms_1 {
   def main(args: Array[String]): Unit = {
     val e_ack =
       Let(
@@ -152,30 +152,5 @@ object Main_Legacy extends lms {
         App(Var(0), Lit(2))
       )
     println(s"[result] ${reifyc(evalms(Nil, e_ack))}")
-
-    // val f_plus: Int => Rep[Int => Int] = { m: Int =>
-    //   fun { n: Rep[Int] =>
-    //     if (m == 0) n
-    //     else f_plus(m - 1)(n + 1)
-    //   }
-    // }
-    val e_plus =
-      Let(
-        Lam(
-          Lam2(
-            Lam(
-              Ifz(
-                Var(1),
-                Var(3),
-                App2(
-                  App(Var(0), (Minus(Var(1), Lit(1)))),
-                  Plus2(Var(3), Lit2(1))
-                )
-              )
-            )
-          )
-        ),
-        App(Var(0), Lit(2))
-      )
   }
 }

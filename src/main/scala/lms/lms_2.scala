@@ -1,7 +1,8 @@
 package lms
+
 import java.io._
 
-trait real_lms {
+trait lms_2 {
 
   trait Exp {}
 
@@ -68,7 +69,7 @@ trait real_lms {
 
 }
 
-object Main extends real_lms {
+object Main_2 extends lms_2 {
   def main(args: Array[String]): Unit = {
     def ack: Int => Rep[Int => Int] = { m: Int =>
       lam { n: Rep[Int] =>
