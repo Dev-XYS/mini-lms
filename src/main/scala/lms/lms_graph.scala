@@ -16,27 +16,60 @@ object Backend {
     override def toString = x.toString
   }
 
-  case class Node(n: Sym, op: String, rhs: List[Def], aliases: Set[Exp], deps: Dependency) {
+  abstract class Aliases
+
+  case object Untracked extends Aliases {
+    override def toString = ""
+  }
+  case class Tracked(aliases: Set[Exp]) extends Aliases {
+    override def toString = s"^{${aliases.mkString(" ")}}"
+  }
+
+  abstract class Type(val aliases: Aliases) {}
+
+  case class TyValue(override val aliases: Aliases) extends Type(aliases) {
+    override def toString = {
+      s"#$aliases"
+    }
+  }
+  case class TyLambda(arg: Type, res: Type, override val aliases: Aliases, eff: EffectSummary) extends Type(aliases) {
+    override def toString = {
+      s"($arg => $res)$aliases ^^{ $eff }"
+    }
+  }
+
+  case class Node(s: Sym, op: String, rhs: List[Def], ty: Type, deps: Dependency) {
     override def toString =
       if (op == "")
         // constant
-        s"$n = ${rhs.mkString(" ")}"
+        s"$s = ${rhs.mkString(" ")}, type: $ty"
       else
         // non-constant
-        s"$n = $op(${rhs.mkString(" ")}), aliases: [${aliases.mkString(" ")}], deps: { $deps }"
+        s"$s = $op(${rhs.mkString(" ")}), type: $ty, deps: { $deps }"
   }
 
   case class Block(in: List[Sym], res: Exp, ein: Sym, eff: EffectSummary, deps: Dependency) extends Def {
     override def toString = s"in: [${in.mkString(" ")}], result: $res, effect: { $eff }, deps: { $deps }"
   }
 
-  case class Dependency(var hdeps: Map[Exp, Set[Exp]], sdeps: Map[Exp, Set[Exp]]) {
+  case class Dependency(hdeps: Map[Exp, Set[Exp]], sdeps: Map[Exp, Set[Exp]]) {
     override def toString = s"hard: {${hdeps.mkString(" ")}}, soft: {${sdeps.mkString(" ")}}"
   }
 
   case class EffectSummary(init: Set[Exp], read: Set[Exp], write: Set[Exp], kill: Set[Exp]) {
     override def toString = s"init: [${init.mkString(" ")}], read: [${read.mkString(" ")}], write: [${write.mkString(" ")}], kill: [${kill.mkString(" ")}]"
+
+    def mergeWith(eff: EffectSummary) {
+      init ++= eff.init
+      read ++= eff.read
+      write ++= eff.write
+      kill ++= eff.kill
+    }
+
+    def +(eff: EffectSummary) = EffectSummary(init ++ eff.init, read ++ eff.read, write ++ eff.write, kill ++ eff.kill)
   }
+
+  def EmptyEffect = EffectSummary(Set(), Set(), Set(), Set())
 
   case class Graph(nodes: List[Node], block: Block) {
     override def toString = {
@@ -61,7 +94,9 @@ class GraphBuilder {
 
   // begin local definitions
 
-  var ein = Sym(-1);
+  var ein = Sym(-1)
+
+  var localEffects: EffectSummary = EmptyEffect
 
   var initSym = Map[Exp, Exp]()
   var lastRead = Map[Exp, Set[Exp]]()
@@ -73,17 +108,19 @@ class GraphBuilder {
   def fresh = try nSyms
   finally nSyms += 1
 
-  def reflect(op: String, as: Def*)(aliases: Set[Exp], self: Boolean)(eff: EffectSummary, init: Boolean = false) = {
-    val s = Sym(fresh)
-    if (self) aliases += s
+  def freshSym = Sym(fresh)
 
+  def reflect(s: Sym, op: String, as: Def*)(ty: Type)(eff: EffectSummary) = {
     // compute dependencies
 
     val hdeps = Map[Exp, Set[Exp]]()
     val sdeps = Map[Exp, Set[Exp]]()
 
+    // update local effects
+    localEffects.mergeWith(eff)
+
     // update dependencies and states
-    if (init) initSym(s) = s
+    // if (init) initSym(s) = s
 
     for (r <- eff.read) {
       hdeps.getOrElseUpdate(r, Set()) += lastWriteOrInit(r)
@@ -98,14 +135,14 @@ class GraphBuilder {
     }
 
     // construct node
-    val n = Node(s, op, as.toList, aliases, Dependency(hdeps, sdeps))
-    globalDefs += n
+    val node = Node(s, op, as.toList, ty, Dependency(hdeps, sdeps))
+    globalDefs += node
     s
   }
 
   def reify(f: Exp => Exp) = withScope {
     // generate symbolic argument
-    val x = Sym(fresh)
+    val x = freshSym
 
     // set current `ein` (for now, it is the same as the function argument)
     ein = x
@@ -127,7 +164,7 @@ class GraphBuilder {
     }
 
     // return a block
-    Block(List(x), res, x, EffectSummary(Set(), Set(lastRead.keys.toSeq: _*), Set(lastWrite.keys.toSeq: _*), Set()), Dependency(hdeps, sdeps))
+    Block(List(x), res, x, localEffects, Dependency(hdeps, sdeps))
   }
 
   def lastWriteOrInit(x: Exp) = {
@@ -137,20 +174,28 @@ class GraphBuilder {
   def withScope(closure: => Block) = {
     // scoping: save the current environment
     val save_ein = ein
+    val save_localEffects = localEffects
     val save_lastRead = lastRead
     val save_lastWrite = lastWrite
 
     try {
       // reset local definitions
+      localEffects = EmptyEffect
       lastRead = Map.empty
       lastWrite = Map.empty
       closure
     } finally {
       // restore environment
       ein = save_ein
+      localEffects = save_localEffects
       lastRead = save_lastRead
       lastWrite = save_lastWrite
     }
+  }
+
+  def getNode(s: Sym): Node = {
+    val Some(node) = globalDefs.find(_.s == s)
+    node
   }
 }
 
@@ -158,7 +203,7 @@ class Frontend {
 
   val g = new GraphBuilder
 
-  def EmptyEffect = EffectSummary(Set(), Set(), Set(), Set())
+  def InitEffect(x: Exp) = EffectSummary(Set(x), Set(), Set(), Set())
   def ReadEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(), Set())
   def WriteEffect(x: Exp) = EffectSummary(Set(), Set(), Set(x), Set())
   def ReadWriteEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(x), Set())
@@ -175,22 +220,48 @@ class Frontend {
   type Rep[T] = Exp
 
   implicit def lift(x: Any) = {
-    g.reflect("", Const(x))(Set(), false)(EmptyEffect)
+    val s = g.freshSym
+    g.reflect(s, "", Const(x))(TyValue(Untracked))(EmptyEffect)
   }
 
   def print(io: Exp, x: Exp) = {
-    g.reflect("print", io, x)(Set(), false)(ReadWriteEffect(io))
+    val s = g.freshSym
+    g.reflect(s, "print", io, x)(TyValue(Untracked))(ReadWriteEffect(io))
   }
 
   def alloc(x: Exp) = {
-    g.reflect("alloc", x)(Set(), true)(ReadEffect(x), true)
+    val s = g.freshSym
+    g.reflect(s, "alloc", x)(TyValue(Tracked(Set(s))))(ReadEffect(x) + InitEffect(s))
   }
 
   def get(x: Exp) = {
-    g.reflect("get", x)(Set(), false)(ReadEffect(x))
+    val s = g.freshSym
+    g.reflect(s, "get", x)(TyValue(Untracked))(ReadEffect(x))
   }
 
   def set(x: Exp, v: Exp) = {
-    g.reflect("set", x, v)(Set(), false)(WriteEffect(x))
+    val s = g.freshSym
+    g.reflect(s, "set", x, v)(TyValue(Untracked))(WriteEffect(x))
+  }
+
+  def inc(x: Exp) = {
+    val s = g.freshSym
+    g.reflect(s, "inc", x)(TyValue(Untracked))(ReadWriteEffect(x))
+  }
+
+  def fun(f: Exp => Exp) = {
+    val s = g.freshSym
+    val block = g.reify(f)
+    val tyRes = g.getNode(block.res.asInstanceOf[Sym]).ty
+    g.reflect(s, "λ", block)(TyLambda(TyValue(Tracked(Set())), tyRes, Tracked(Set()), block.eff))(EmptyEffect)
+  }
+
+  implicit class Lambda(f: Exp) {
+    def apply(x: Exp) = {
+      val s = g.freshSym
+      val node = g.getNode(f.asInstanceOf[Sym])
+      val ty = node.ty.asInstanceOf[TyLambda]
+      g.reflect(s, "@", f, x)(ty.res)(ty.eff)
+    }
   }
 }
