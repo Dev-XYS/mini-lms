@@ -2,40 +2,43 @@ package lms
 
 import org.scalatest.FunSuite
 
+abstract class Snippet[A, B] extends Frontend {
+
+  def main(x: Rep[A]): Rep[B]
+
+  lazy val graph = getGraph(main)
+}
+
 class GraphTests extends FunSuite {
 
   test("basic println") {
-    val snippet = new Frontend {
-      def f(stdout: Rep[Int]) = {
+    val snippet = new Snippet[Int, Int] {
+      def main(stdout: Rep[Int]) = {
         print(stdout, 1)
         print(stdout, 2)
         0
       }
-
-      lazy val graph = getGraph(f)
     }
 
-    println(snippet.graph)
+    assert(snippet.graph.toString == Data.graph("basic println"))
   }
 
   test("basic dce 1") {
-    val snippet = new Frontend {
-      def f(store: Rep[Int]) = {
+    val snippet = new Snippet[Int, Int] {
+      def main(store: Rep[Int]) = {
         val c = alloc(store)
         val d = alloc(store) // dce
         get(d) // dce
         get(c)
       }
-
-      lazy val graph = getGraph(f)
     }
 
-    println(snippet.graph)
+    assert(snippet.graph.toString == Data.graph("basic dce 1"))
   }
 
   test("basic dce 2") {
-    val snippet = new Frontend {
-      def f(store: Rep[Int]) = {
+    val snippet = new Snippet[Int, Int] {
+      def main(store: Rep[Int]) = {
         val c = alloc(store)
         set(c, 0) // dce
         get(c) // dce
@@ -43,36 +46,13 @@ class GraphTests extends FunSuite {
         get(c) // dce
         get(c)
       }
-
-      lazy val graph = getGraph(f)
     }
 
-    println(snippet.graph)
-  }
-
-  test("simple lambda") {
-    val snippet = new Frontend {
-      def main(store: Rep[Int]) = {
-        // val f = fun { (a: Rep[Int]) =>
-        //   {
-        //     a
-        //   }
-        // }
-        val f = fun { (a: Rep[Int]) =>
-          val c = alloc(store)
-          val g = fun { (b: Rep[Int]) => c }
-          g
-        }
-      }
-
-      lazy val graph = getGraph(main)
-    }
-
-    println(snippet.graph)
+    assert(snippet.graph.toString == Data.graph("basic dce 2"))
   }
 
   test("escaping ref") {
-    val snippet = new Frontend {
+    val snippet = new Snippet[Int, Int] {
       def main(store: Rep[Int]) = {
         val f = fun { (a: Rep[Int]) =>
           val c = alloc(store)
@@ -95,10 +75,9 @@ class GraphTests extends FunSuite {
         // - c3 and c4 are never read and hence
         //   dce'd along with all their ops
       }
-
-      lazy val graph = getGraph(main)
     }
 
     println(snippet.graph)
+    assert(snippet.graph.toString == Data.graph("escaping ref"))
   }
 }
