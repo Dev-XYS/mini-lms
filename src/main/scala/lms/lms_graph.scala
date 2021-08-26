@@ -140,9 +140,7 @@ object Backend {
   }
 
   case class Dependency(hdeps: Map[Exp, Set[Exp]], sdeps: Map[Exp, Set[Exp]]) {
-    // override def toString = s"hard: {${hdeps.mkString(" ")}}, soft: {${sdeps.mkString(" ")}}"
-    // do not display dependency info for now
-    override def toString = ""
+    override def toString = s"hard: {${hdeps.mkString(" ")}}, soft: {${sdeps.mkString(" ")}}"
   }
 
   object Dependency {
@@ -227,6 +225,7 @@ class GraphBuilder {
   var initSym = mutable.Map[Exp, Exp]()
   var lastRead = mutable.Map[Exp, mutable.Set[Exp]]()
   var lastWrite = mutable.Map[Exp, Exp]()
+  var killAt = mutable.Map[Exp, Exp]()
 
   // end local definitions
 
@@ -252,7 +251,9 @@ class GraphBuilder {
     localEffects = localEffects.mergeWith(EffectSummary(init, read, write, kill))
 
     // update dependencies and states
-    // if (init) initSym(s) = s
+    for (i <- init) {
+      initSym(i) = i
+    }
 
     for (r <- read) {
       hdeps.getOrElseUpdate(r, mutable.Set()) += lastWriteOrInit(r)
@@ -264,6 +265,14 @@ class GraphBuilder {
       sdeps(w) ++= lastRead.getOrElse(w, mutable.Set()) - s
       lastWrite(w) = s
       lastRead(w) = mutable.Set()
+    }
+
+    for (k <- kill) {
+      sdeps.getOrElseUpdate(k, mutable.Set()) += lastWriteOrInit(k)
+      sdeps(k) ++= lastRead.getOrElse(k, mutable.Set()) - s
+      killAt(k) = s
+      lastWrite remove k
+      lastRead(k) = mutable.Set()
     }
 
     // construct node
@@ -300,7 +309,18 @@ class GraphBuilder {
     }
 
     for ((key, w) <- lastWrite) {
-      hdeps(key) = mutable.Set(w)
+      // Local effects are soft dependencies and non-local effects are hard dependencies.
+      if (localDefined contains key)
+        sdeps.getOrElseUpdate(key, mutable.Set()) += w
+      else
+        hdeps.getOrElseUpdate(key, mutable.Set()) += w
+    }
+
+    for ((key, k) <- killAt) {
+      if (localDefined contains key)
+        sdeps.getOrElseUpdate(key, mutable.Set()) += k
+      else
+        hdeps.getOrElseUpdate(key, mutable.Set()) += k
     }
 
     // return a block
@@ -317,16 +337,20 @@ class GraphBuilder {
     val save_localEffects = localEffects
     val save_localUsed = localUsed
     val save_localDefined = localDefined
+    val save_initSym = initSym
     val save_lastRead = lastRead
     val save_lastWrite = lastWrite
+    val save_killAt = killAt
 
     try {
       // reset local definitions
       localEffects = EmptyEffect
       localUsed = mutable.Set.empty
       localDefined = mutable.Set.empty
+      initSym = mutable.Map.empty
       lastRead = mutable.Map.empty
       lastWrite = mutable.Map.empty
+      killAt = mutable.Map.empty
       closure
     } finally {
       // restore environment
@@ -334,8 +358,10 @@ class GraphBuilder {
       localEffects = save_localEffects
       localUsed = save_localUsed
       localDefined = save_localDefined
+      initSym = save_initSym
       lastRead = save_lastRead
       lastWrite = save_lastWrite
+      killAt = save_killAt
     }
   }
 
@@ -486,9 +512,14 @@ class Frontend {
       // The function is in the form f(x:#) => # ^^{x}
       val appEff = ty.eff.subst(ty.argSym, x)
 
+      // Tracked result is initialized.
+      val eff =
+        if (tyRes.tracked) appEff + InitEffect(s)
+        else appEff
+
       // reflect
       // (If an application returns a tracked value, it must at least alias itself. Not sure.)
-      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(appEff)
+      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(eff)
     }
   }
 }
