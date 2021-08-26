@@ -9,7 +9,9 @@ object Backend {
   abstract class Exp extends Def
 
   case class Sym(n: Int) extends Exp {
-    override def toString = s"x$n"
+    override def toString =
+      if (n == -1) "x*"
+      else s"x$n"
   }
   case class Const(x: Any) extends Exp {
     override def toString = x.toString
@@ -198,7 +200,8 @@ object Backend {
       val stream = new java.io.PrintStream(source)
       stream.println("====================")
       for (node <- nodes)
-        stream.println(node)
+        if (node.op != "(arg)") // symbolic arguments should not be printed
+          stream.println(node)
       stream.println("--------------------")
       stream.println(block)
       stream.println("====================")
@@ -250,26 +253,40 @@ class GraphBuilder {
     // update local effects
     localEffects = localEffects.mergeWith(EffectSummary(init, read, write, kill))
 
-    // update dependencies and states
+    // compute dependencies
     for (i <- init) {
       initSym(i) = i
     }
 
     for (r <- read) {
       hdeps.getOrElseUpdate(r, mutable.Set()) += lastWriteOrInit(r)
-      lastRead.getOrElseUpdate(r, mutable.Set()) += s
     }
 
     for (w <- write) {
       sdeps.getOrElseUpdate(w, mutable.Set()) += lastWriteOrInit(w)
-      sdeps(w) ++= lastRead.getOrElse(w, mutable.Set()) - s
+      sdeps(w) ++= lastRead.getOrElse(w, mutable.Set())
+    }
+
+    for (k <- kill) {
+      sdeps.getOrElseUpdate(k, mutable.Set()) += lastWriteOrInit(k)
+      sdeps(k) ++= lastRead.getOrElse(k, mutable.Set())
+    }
+
+    // update states
+    for (i <- init) {
+      initSym(i) = i
+    }
+
+    for (r <- read) {
+      lastRead.getOrElseUpdate(r, mutable.Set()) += s
+    }
+
+    for (w <- write) {
       lastWrite(w) = s
       lastRead(w) = mutable.Set()
     }
 
     for (k <- kill) {
-      sdeps.getOrElseUpdate(k, mutable.Set()) += lastWriteOrInit(k)
-      sdeps(k) ++= lastRead.getOrElse(k, mutable.Set()) - s
       killAt(k) = s
       lastWrite remove k
       lastRead(k) = mutable.Set()
@@ -286,9 +303,10 @@ class GraphBuilder {
     s
   }
 
-  def reify(f: Exp => Exp) = withScope {
-    // generate symbolic argument
-    val x = freshSym
+  def reify(f: Exp => Exp, x: Sym, tyArg: Type) = withScope {
+    // add the argument to the node list for later use
+    // not sure if it is the best way to implement it
+    globalDefs += Node(x, "(arg)", List(), tyArg, Dependency(Map(), Map()))
 
     // set current `ein` (for now, it is the same as the function argument)
     ein = x
@@ -404,13 +422,14 @@ class Frontend {
   // user-accessible functions
 
   def getGraph(f: Exp => Exp) = {
-    val block = g.reify(f)
+    val x = g.freshSym // always assume one tracked argument for now
+    val block = g.reify(f, x, TyValue(Tracked(Set(x))))
     Graph(g.globalDefs.toList, block)
   }
 
   // program constructs
 
-  type Rep[T] = Exp
+  type Rep = Exp
 
   implicit def lift(x: Any) = {
     val s = g.freshSym
@@ -447,9 +466,29 @@ class Frontend {
     g.reflect(s, "free", x)(TyValue(Untracked))(Set(x))(KillEffect(x))
   }
 
-  def fun(f: Exp => Exp) = {
+  // begin type annotations
+
+  class FrontendType
+
+  case object uv extends FrontendType // #
+  case object tv extends FrontendType // #^{}
+  case object rwk extends FrontendType // f(# => #)^{f} ^^{read: [f], write: [f], kill: [f]}
+
+  def convertType(ty: FrontendType, s: Sym): Type = {
+    ty match {
+      case `uv`  => TyValue(Untracked)
+      case `tv`  => TyValue(Tracked(Set(s)))
+      case `rwk` => TyLambda(s, Sym(-1), TyValue(Untracked), TyValue(Untracked), Tracked(Set(s)), EffectSummary(Set(), Set(s), Set(s), Set(s)))
+    }
+  }
+
+  // end type annotations
+
+  def fun(_tyArg: FrontendType = tv)(f: Exp => Exp) = {
     val s = g.freshSym
-    val block = g.reify(f)
+    val x = g.freshSym // symbol for the argument
+    val tyArg = convertType(_tyArg, x)
+    val block = g.reify(f, x, tyArg)
     val tyRes = g.getNode(block.res.asInstanceOf[Sym]).get.ty
 
     // rewire escaping closures
@@ -483,7 +522,7 @@ class Frontend {
       TyLambda(
         s,
         block.in(0),
-        TyValue(Tracked(Set())),
+        tyArg,
         tyResRewired,
         Tracked(usedNonlocal ++ (if (usedNonlocal.isEmpty) Set() else Set(s))),
         lamEff
@@ -518,7 +557,7 @@ class Frontend {
         else appEff
 
       // reflect
-      // (If an application returns a tracked value, it must at least alias itself. Not sure.)
+      // (If an application returns a tracked value, it must at least alias itself.)
       g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(eff)
     }
   }

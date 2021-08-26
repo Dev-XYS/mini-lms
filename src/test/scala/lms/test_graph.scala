@@ -2,9 +2,9 @@ package lms
 
 import org.scalatest.FunSuite
 
-abstract class Snippet[A, B] extends Frontend {
+abstract class Snippet extends Frontend {
 
-  def main(x: Rep[A]): Rep[B]
+  def main(x: Rep): Rep
 
   lazy val graph = getGraph(main)
 }
@@ -12,8 +12,8 @@ abstract class Snippet[A, B] extends Frontend {
 class GraphTests extends FunSuite {
 
   test("basic println") {
-    val snippet = new Snippet[Int, Int] {
-      def main(stdout: Rep[Int]) = {
+    val snippet = new Snippet {
+      def main(stdout: Rep) = {
         print(stdout, 1)
         print(stdout, 2)
         0
@@ -24,8 +24,8 @@ class GraphTests extends FunSuite {
   }
 
   test("basic dce 1") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
+    val snippet = new Snippet {
+      def main(store: Rep) = {
         val c = alloc(store)
         val d = alloc(store) // dce
         get(d) // dce
@@ -37,8 +37,8 @@ class GraphTests extends FunSuite {
   }
 
   test("basic dce 2") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
+    val snippet = new Snippet {
+      def main(store: Rep) = {
         val c = alloc(store)
         set(c, 0) // dce
         get(c) // dce
@@ -52,11 +52,11 @@ class GraphTests extends FunSuite {
   }
 
   test("escaping ref") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
-        val f = fun { (a: Rep[Int]) =>
+    val snippet = new Snippet {
+      def main(store: Rep) = {
+        val f = fun() { (a: Rep) =>
           val c = alloc(store)
-          val g = fun { (b: Rep[Int]) => c }
+          val g = fun() { (b: Rep) => c }
           g
         }
         val h0 = f(0)
@@ -81,8 +81,8 @@ class GraphTests extends FunSuite {
   }
 
   test("compact codegen soft deps") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
+    val snippet = new Snippet {
+      def main(store: Rep) = {
         val c = alloc(store)
         val r = get(c) // may not move after inc
         inc(c)
@@ -95,8 +95,8 @@ class GraphTests extends FunSuite {
   }
 
   test("consume effects 1") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
+    val snippet = new Snippet {
+      def main(store: Rep) = {
         val c = alloc(store)
         inc(c)
         print(store, get(c))
@@ -109,9 +109,9 @@ class GraphTests extends FunSuite {
   }
 
   test("consume effects 2") {
-    val snippet = new Snippet[Int, Int] {
-      def main(store: Rep[Int]) = {
-        val myfree = fun { (c: Rep[Int]) =>
+    val snippet = new Snippet {
+      def main(store: Rep) = {
+        val myfree = fun() { (c: Rep) =>
           free(c)
         }
         val c = alloc(store)
@@ -119,6 +119,28 @@ class GraphTests extends FunSuite {
         print(store, get(c))
         myfree(c)
         get(c) // error
+      }
+    }
+
+    println(snippet.graph)
+  }
+
+  test("effect polymorphism 1") {
+    val snippet = new Snippet {
+      def main(store: Rep) = {
+        // rwk is an abbreviation for read, write, kill
+        // result type: Int @call(f)
+        val gen = fun(rwk) { (f: Rep) =>
+          f(1)
+        }
+        val g = fun() { (x: Rep) =>
+          {
+            print(store, x)
+            x
+          }
+        }
+        val res = gen(g) // effect: @call(g), doesn't really kill g or store!
+        print(store, 1)
       }
     }
 
