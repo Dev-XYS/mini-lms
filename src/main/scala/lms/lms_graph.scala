@@ -181,6 +181,15 @@ object Backend {
     }
 
     def isEmpty: Boolean = init.isEmpty && read.isEmpty && write.isEmpty && kill.isEmpty
+
+    def subst(from: Exp, to: Exp) = {
+      EffectSummary(
+        init map (x => if (x == from) to else x),
+        read map (x => if (x == from) to else x),
+        write map (x => if (x == from) to else x),
+        kill map (x => if (x == from) to else x)
+      )
+    }
   }
 
   def EmptyEffect = EffectSummary(Set(), Set(), Set(), Set())
@@ -364,6 +373,7 @@ class Frontend {
   def ReadEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(), Set())
   def WriteEffect(x: Exp) = EffectSummary(Set(), Set(), Set(x), Set())
   def ReadWriteEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(x), Set())
+  def KillEffect(x: Exp) = EffectSummary(Set(), Set(), Set(), Set(x))
 
   // user-accessible functions
 
@@ -406,6 +416,11 @@ class Frontend {
     g.reflect(s, "inc", x)(TyValue(Untracked))(Set(x))(ReadWriteEffect(x))
   }
 
+  def free(x: Exp) = {
+    val s = g.freshSym
+    g.reflect(s, "free", x)(TyValue(Untracked))(Set(x))(KillEffect(x))
+  }
+
   def fun(f: Exp => Exp) = {
     val s = g.freshSym
     val block = g.reify(f)
@@ -435,6 +450,7 @@ class Frontend {
         .excludeKeys(block.defined)
 
     val lamEff = block.eff excluding block.defined
+    val usedNonlocal = block.used -- block.defined -- block.in.toSet
 
     g.reflect(s, "λ", block)(
       // assume that lambda has exactly one parameter
@@ -443,10 +459,10 @@ class Frontend {
         block.in(0),
         TyValue(Tracked(Set())),
         tyResRewired,
-        Tracked(block.used ++ (if (block.used.isEmpty) Set() else Set(s))) excluding block.defined,
+        Tracked(usedNonlocal ++ (if (usedNonlocal.isEmpty) Set() else Set(s))),
         lamEff
       )
-    )(Set())(if (lamEff.isEmpty) EmptyEffect else InitEffect(s) /* If a function closes over something, it has an init effect. (not sure) */ )
+    )(Set())(if ((lamEff excluding block.in.toSet).isEmpty) EmptyEffect else InitEffect(s) /* If a function closes over something, it has an init effect. (not sure) */ )
   }
 
   implicit class Lambda(f: Exp) {
@@ -467,9 +483,12 @@ class Frontend {
         if (_tyRes.alias.contains(ty.argSym)) _tyRes.substAlias(ty.argSym, x)
         else _tyRes
 
+      // The function is in the form f(x:#) => # ^^{x}
+      val appEff = ty.eff.subst(ty.argSym, x)
+
       // reflect
       // (If an application returns a tracked value, it must at least alias itself. Not sure.)
-      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(ty.eff)
+      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(appEff)
     }
   }
 }

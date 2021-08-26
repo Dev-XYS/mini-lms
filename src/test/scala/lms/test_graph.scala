@@ -77,7 +77,51 @@ class GraphTests extends FunSuite {
       }
     }
 
-    println(snippet.graph)
     assert(snippet.graph.toString == Data.graph("escaping ref"))
+  }
+
+  test("compact codegen soft deps") {
+    val snippet = new Snippet[Int, Int] {
+      def main(store: Rep[Int]) = {
+        val c = alloc(store)
+        val r = get(c) // may not move after inc
+        inc(c)
+        print(store, get(c))
+        r // tempting to inline r here
+      }
+    }
+
+    println(snippet.graph)
+  }
+
+  test("consume effects 1") {
+    val snippet = new Snippet[Int, Int] {
+      def main(store: Rep[Int]) = {
+        val c = alloc(store)
+        inc(c)
+        print(store, get(c))
+        free(c)
+        get(c) // error
+      }
+    }
+
+    println(snippet.graph)
+  }
+
+  test("consume effects 2") {
+    val snippet = new Snippet[Int, Int] {
+      def main(store: Rep[Int]) = {
+        val myfree = fun { (c: Rep[Int]) =>
+          free(c)
+        }
+        val c = alloc(store)
+        inc(c)
+        print(store, get(c))
+        myfree(c)
+        get(c) // error
+      }
+    }
+
+    println(snippet.graph)
   }
 }
