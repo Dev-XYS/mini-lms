@@ -254,10 +254,6 @@ class GraphBuilder {
     localEffects = localEffects.mergeWith(EffectSummary(init, read, write, kill))
 
     // compute dependencies
-    for (i <- init) {
-      initSym(i) = i
-    }
-
     for (r <- read) {
       hdeps.getOrElseUpdate(r, mutable.Set()) += lastWriteOrInit(r)
     }
