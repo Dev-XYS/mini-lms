@@ -81,6 +81,8 @@ object Backend {
     def withAdditionalAlias(keys: Set[Exp]): Type
 
     def substAlias(from: Exp, to: Exp): Type
+
+    def subst(from: Exp, to: Exp): Type
   }
 
   case class TyValue(override val alias: Alias) extends Type(alias) {
@@ -103,6 +105,10 @@ object Backend {
     def substAlias(from: Exp, to: Exp) = {
       TyValue(alias.subst(from, to))
     }
+
+    def subst(from: Exp, to: Exp) = {
+      TyValue(alias.subst(from, to))
+    }
   }
 
   case class TyLambda(funSym: Sym, argSym: Sym, arg: Type, res: Type, override val alias: Alias, eff: EffectSummary) extends Type(alias) {
@@ -115,7 +121,7 @@ object Backend {
     }
 
     def excludeKeys(keys: Set[Exp]) = {
-      TyLambda(funSym, argSym, arg excludeKeys (keys - funSym - argSym), res excludeKeys (keys - funSym - argSym), alias excluding keys, eff excluding keys)
+      TyLambda(funSym, argSym, arg excludeKeys (keys - funSym - argSym), res excludeKeys (keys - funSym - argSym), alias excluding keys, eff excluding (keys - funSym - argSym))
     }
 
     def withAdditionalAlias(keys: Set[Exp]) = {
@@ -124,6 +130,10 @@ object Backend {
 
     def substAlias(from: Exp, to: Exp) = {
       TyLambda(funSym, argSym, arg, res, alias.subst(from, to), eff)
+    }
+
+    def subst(from: Exp, to: Exp) = {
+      TyLambda(funSym, argSym, arg, res.subst(from, to), alias.subst(from, to), eff.subst(from, to))
     }
   }
 
@@ -162,9 +172,7 @@ object Backend {
           -- eff.kill // kill overrides init
         ,
         read
-          ++ eff.read
-          -- eff.write // write overrides read (if a location is written to, we do not care if it is read)
-          -- eff.kill // kill overrides read
+          ++ (eff.read -- write) // If a key has already been written to, read has no global effect on it.
         ,
         write
           ++ eff.write
@@ -403,6 +411,21 @@ class GraphBuilder {
     helper(aliases)
     Set(res.toSeq: _*)
   }
+
+  /* *
+   * Calculate the result type when leaving a scope.
+   * (Rewiring, eliminating local symbols, ...)
+   * */
+  def leavingScope(ty: Type, locals: Set[Exp]) = {
+    (ty match {
+      case TyLambda(funSym, argSym, arg, res, alias, eff) => {
+        locals
+          .foldLeft(ty)((t, s) => t.subst(s, funSym))
+      }
+      case _ => ty
+    })
+      .excludeKeys(locals)
+  }
 }
 
 class Frontend {
@@ -487,28 +510,30 @@ class Frontend {
     val block = g.reify(f, x, tyArg)
     val tyRes = g.getNode(block.res.asInstanceOf[Sym]).get.ty
 
-    // rewire escaping closures
-    val tyResRewired =
-      (tyRes match {
-        case TyLambda(funSym, argSym, arg, res, alias, eff) => {
-          res.alias match {
-            case Tracked(aliases) => {
-              val _aliases =
-                if (aliases exists (x => block.defined contains x)) {
-                  // closure escaped
-                  aliases + block.res
-                } else {
-                  aliases
-                }
-              TyLambda(funSym, argSym, arg, res.withNewAlias(Tracked(_aliases -- (block.defined - funSym))), alias, eff)
-            }
-            case _ => tyRes
-          }
-        }
-        case _ => tyRes
-      })
-        // eliminate unavailable variables
-        .excludeKeys(block.defined)
+    // // rewire escaping closures
+    // val tyResRewired =
+    //   (tyRes match {
+    //     case TyLambda(funSym, argSym, arg, res, alias, eff) => {
+    //       res.alias match {
+    //         case Tracked(aliases) => {
+    //           val _aliases =
+    //             if (aliases exists (x => block.defined contains x)) {
+    //               // closure escaped
+    //               aliases + block.res
+    //             } else {
+    //               aliases
+    //             }
+    //           TyLambda(funSym, argSym, arg, res.withNewAlias(Tracked(_aliases -- (block.defined - funSym))), alias, eff)
+    //         }
+    //         case _ => tyRes
+    //       }
+    //     }
+    //     case _ => tyRes
+    //   })
+    //     // eliminate unavailable variables
+    //     .excludeKeys(block.defined)
+
+    val tyResRewired = g.leavingScope(tyRes, block.defined)
 
     val lamEff = block.eff excluding block.defined
     val usedNonlocal = block.used -- block.defined -- block.in.toSet
@@ -544,8 +569,11 @@ class Frontend {
         if (_tyRes.alias.contains(ty.argSym)) _tyRes.substAlias(ty.argSym, x)
         else _tyRes
 
+      // The function is in the form f(x:#) => # ^^{f}
+      val _appEff = ty.eff.subst(ty.funSym, f)
+
       // The function is in the form f(x:#) => # ^^{x}
-      val appEff = ty.eff.subst(ty.argSym, x)
+      val appEff = _appEff.subst(ty.argSym, x)
 
       // Tracked result is initialized.
       val eff =

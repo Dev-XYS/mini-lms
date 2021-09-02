@@ -146,4 +146,29 @@ class GraphTests extends FunSuite {
 
     println(snippet.graph)
   }
+
+  test("Example 1: Tracking Independent Heap Objects") {
+    val snippet = new Snippet {
+      def main(world: Rep) = {
+        val counter = fun() { (unit: Rep) =>
+          val c = alloc(world)
+          fun() { (unit: Rep) => inc(c) }
+        }
+        val inc1 = counter()
+        val inc2 = counter()
+        inc1()
+        inc1()
+        inc2()
+        inc2()
+        // uncomment the following lines one by one
+        // and watch the target code change:
+        inc2()
+        // inc1()
+        // inc1() + inc2()
+        // 0
+      }
+    }
+
+    println(snippet.graph)
+  }
 }
