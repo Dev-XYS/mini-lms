@@ -599,29 +599,6 @@ class Frontend {
     val block = g.reify(f, x, tyArg)
     val tyRes = g.getNode(block.res.asInstanceOf[Sym]).get.ty
 
-    // // rewire escaping closures
-    // val tyResRewired =
-    //   (tyRes match {
-    //     case TyLambda(funSym, argSym, arg, res, alias, eff) => {
-    //       res.alias match {
-    //         case Tracked(aliases) => {
-    //           val _aliases =
-    //             if (aliases exists (x => block.defined contains x)) {
-    //               // closure escaped
-    //               aliases + block.res
-    //             } else {
-    //               aliases
-    //             }
-    //           TyLambda(funSym, argSym, arg, res.withNewAlias(Tracked(_aliases -- (block.defined - funSym))), alias, eff)
-    //         }
-    //         case _ => tyRes
-    //       }
-    //     }
-    //     case _ => tyRes
-    //   })
-    //     // eliminate unavailable variables
-    //     .excludeKeys(block.defined)
-
     val tyResRewired = g.leavingScope(tyRes, block.defined)
 
     val lamEff = block.eff excluding block.defined
