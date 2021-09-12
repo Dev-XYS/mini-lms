@@ -308,10 +308,6 @@ class GraphBuilder {
   }
 
   def reify(f: Exp => Exp, x: Sym, tyArg: Type) = withScope {
-    // add the argument to the node list for later use
-    // not sure if it is the best way to implement it
-    globalDefs += Node(x, "(arg)", List(), tyArg, Dependency(Map(), Map()))
-
     // set current `ein` (for now, it is the same as the function argument)
     ein = x
 
@@ -487,18 +483,106 @@ class Frontend {
 
   // begin type annotations
 
-  class FrontendType
+  case class RefFun(lv: Int) extends Exp
+  case class RefArg(lv: Int) extends Exp
 
-  case object uv extends FrontendType // #
-  case object tv extends FrontendType // #^{}
-  case object rwk extends FrontendType // f(# => #)^{f} ^^{read: [f], write: [f], kill: [f]}
+  abstract class FrontendAlias {
+    def substFun(lv: Int, to: Exp): FrontendAlias
+    def substArg(lv: Int, to: Exp): FrontendAlias
 
-  def convertType(ty: FrontendType, s: Sym): Type = {
-    ty match {
-      case `uv`  => TyValue(Untracked)
-      case `tv`  => TyValue(Tracked(Set(s)))
-      case `rwk` => TyLambda(s, Sym(-1), TyValue(Untracked), TyValue(Untracked), Tracked(Set(s)), EffectSummary(Set(), Set(s), Set(s), Set(s)))
+    def convert: Alias
+  }
+
+  case object FrontendUntracked extends FrontendAlias {
+    def substFun(lv: Int, to: Exp) = FrontendUntracked
+    def substArg(lv: Int, to: Exp) = FrontendUntracked
+
+    def convert = Untracked
+  }
+
+  case class FrontendTracked(aliases: Set[Exp]) extends FrontendAlias {
+    def substFun(lv: Int, to: Exp) = {
+      FrontendTracked(aliases map (x => if (x == RefFun(lv)) to else x))
     }
+    def substArg(lv: Int, to: Exp) = {
+      FrontendTracked(aliases map (x => if (x == RefArg(lv)) to else x))
+    }
+
+    def convert = Tracked(aliases)
+  }
+
+  case class FrontendEffect(init: Set[Exp], read: Set[Exp], write: Set[Exp], kill: Set[Exp]) {
+    def substFun(lv: Int, to: Exp) = {
+      FrontendEffect(
+        init map (x => if (x == RefFun(lv)) to else x),
+        read map (x => if (x == RefFun(lv)) to else x),
+        write map (x => if (x == RefFun(lv)) to else x),
+        kill map (x => if (x == RefFun(lv)) to else x)
+      )
+    }
+    def substArg(lv: Int, to: Exp) = {
+      FrontendEffect(
+        init map (x => if (x == RefArg(lv)) to else x),
+        read map (x => if (x == RefArg(lv)) to else x),
+        write map (x => if (x == RefArg(lv)) to else x),
+        kill map (x => if (x == RefArg(lv)) to else x)
+      )
+    }
+
+    def convert = {
+      EffectSummary(init, read, write, kill)
+    }
+  }
+
+  abstract class FrontendType {
+    def substFun(lv: Int, to: Exp): FrontendType
+    def substArg(lv: Int, to: Exp): FrontendType
+  }
+
+  case class FrontendValue(alias: FrontendAlias) extends FrontendType {
+    def substFun(lv: Int, to: Exp) = {
+      FrontendValue(alias.substFun(lv, to))
+    }
+    def substArg(lv: Int, to: Exp) = {
+      FrontendValue(alias.substArg(lv, to))
+    }
+  }
+  case class FrontendLambda(arg: FrontendType, res: FrontendType, alias: FrontendAlias, eff: FrontendEffect) extends FrontendType {
+    def substFun(lv: Int, to: Exp) = {
+      FrontendLambda(arg.substFun(lv + 1, to), res.substFun(lv + 1, to), alias.substFun(lv, to), eff.substFun(lv, to))
+    }
+    def substArg(lv: Int, to: Exp) = {
+      FrontendLambda(arg.substArg(lv + 1, to), res.substArg(lv + 1, to), alias.substArg(lv, to), eff.substArg(lv, to))
+    }
+  }
+
+  val uv = FrontendValue(FrontendUntracked)
+  val tv = FrontendValue(FrontendTracked(Set.empty))
+  val rwk = FrontendLambda(uv, uv, FrontendTracked(Set(RefFun(0))), FrontendEffect(Set(), Set(RefFun(0)), Set(RefFun(0)), Set(RefFun(0))))
+
+  def convertType(ty: FrontendType): Type = {
+    def helper(ty: FrontendType): Type = {
+      ty match {
+        case FrontendValue(alias) => TyValue(alias.convert)
+        case FrontendLambda(arg, res, alias, eff) => {
+          val funSym = g.freshSym
+          val argSym = g.freshSym
+
+          val _arg = helper(arg.substFun(0, funSym).substArg(0, argSym))
+          val _res = helper(res.substFun(0, funSym).substArg(0, argSym))
+          val _alias = alias.substFun(0, funSym).substArg(0, argSym).convert
+          val _eff = eff.substFun(0, funSym).substArg(0, argSym).convert
+
+          // add the argument to the node list for later use
+          // not sure if it is the best way to implement it
+          g.globalDefs += Node(argSym, "(arg)", List(), _arg, Dependency(Map(), Map()))
+
+          TyLambda(funSym, argSym, _arg, _res, _alias, _eff)
+        }
+      }
+    }
+
+    helper(ty)
   }
 
   // end type annotations
@@ -506,7 +590,12 @@ class Frontend {
   def fun(_tyArg: FrontendType = tv)(f: Exp => Exp) = {
     val s = g.freshSym
     val x = g.freshSym // symbol for the argument
-    val tyArg = convertType(_tyArg, x)
+
+    val tyArg = convertType(_tyArg)
+
+    // add dummy argument to node list
+    g.globalDefs += Node(x, "(arg)", List(), tyArg, Dependency(Map(), Map()))
+
     val block = g.reify(f, x, tyArg)
     val tyRes = g.getNode(block.res.asInstanceOf[Sym]).get.ty
 
