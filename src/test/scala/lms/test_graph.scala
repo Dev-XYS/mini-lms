@@ -54,9 +54,9 @@ class GraphTests extends FunSuite {
   test("escaping ref") {
     val snippet = new Snippet {
       def main(store: Rep) = {
-        val f = fun() { (a: Rep) =>
+        val f = fun(uv) { (a: Rep) =>
           val c = alloc(store)
-          val g = fun() { (b: Rep) => c }
+          val g = fun(uv) { (b: Rep) => c }
           g
         }
         val h0 = f(0)
@@ -166,6 +166,55 @@ class GraphTests extends FunSuite {
         // inc1()
         // inc1() + inc2()
         // 0
+      }
+    }
+
+    println(snippet.graph)
+  }
+
+  test("pair encoding") {
+    val snippet = new Snippet {
+      val tySelect = FrontendLambda(tv, FrontendLambda(tv, tv, FrontendUntracked, emptyEffect), FrontendUntracked, emptyEffect)
+      val tyPair = FrontendLambda(tySelect, tv, FrontendUntracked, emptyEffect)
+
+      def main(world: Rep) = {
+        val pair = fun() { (a: Rep) =>
+          fun() { (b: Rep) =>
+            fun(tySelect) { (select: Rep) =>
+              select(a)(b)
+            }
+          }
+        }
+
+        val _fst = fun() { (a: Rep) =>
+          fun() { (b: Rep) =>
+            a
+          }
+        }
+
+        val _snd = fun() { (a: Rep) =>
+          fun() { (b: Rep) =>
+            b
+          }
+        }
+
+        val fst = fun(tyPair) { (p: Rep) =>
+          p(_fst)
+        }
+
+        val snd = fun(tyPair) { (p: Rep) =>
+          p(_snd)
+        }
+
+        val f = fun() { (unit: Rep) =>
+          val a = alloc(world)
+          val b = alloc(world)
+          pair(a)(b)
+        }
+
+        val p = f()
+        free(fst(p))
+        free(snd(p))
       }
     }
 

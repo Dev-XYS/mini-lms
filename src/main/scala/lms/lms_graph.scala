@@ -17,6 +17,13 @@ object Backend {
     override def toString = x.toString
   }
 
+  implicit val orderingExp: Ordering[Exp] = Ordering.by(e =>
+    e match {
+      case Const(s) => -s.##.abs
+      case Sym(n)   => n
+    }
+  )
+
   abstract class Alias {
     def excluding(keys: Set[Exp]): Alias
 
@@ -29,6 +36,10 @@ object Backend {
     def subst(from: Exp, to: Exp): Alias
 
     def aliasSet: Set[Exp]
+
+    def <=(rhs: Alias): Boolean
+
+    def intersectWith(a: Alias): Alias
   }
 
   case object Untracked extends Alias {
@@ -45,6 +56,12 @@ object Backend {
     def subst(from: Exp, to: Exp) = Untracked
 
     def aliasSet = Set.empty
+
+    def <=(rhs: Alias) = {
+      rhs == Untracked
+    }
+
+    def intersectWith(a: Alias) = a
   }
 
   case class Tracked(aliases: Set[Exp]) extends Alias {
@@ -69,6 +86,19 @@ object Backend {
     }
 
     def aliasSet = aliases
+
+    def <=(rhs: Alias) = {
+      rhs == Untracked || (aliases subsetOf rhs.asInstanceOf[Tracked].aliases)
+    }
+
+    def intersectWith(a: Alias) = {
+      if (a == Untracked) {
+        Tracked(aliases)
+      } else {
+        val Tracked(as) = a
+        Tracked(aliases intersect as)
+      }
+    }
   }
 
   abstract class Type(val alias: Alias) {
@@ -83,6 +113,10 @@ object Backend {
     def substAlias(from: Exp, to: Exp): Type
 
     def subst(from: Exp, to: Exp): Type
+
+    def isSubtypeOf(ty: Type): Boolean
+
+    def intersectAliasWith(a: Alias): Type
   }
 
   case class TyValue(override val alias: Alias) extends Type(alias) {
@@ -109,6 +143,14 @@ object Backend {
     def subst(from: Exp, to: Exp) = {
       TyValue(alias.subst(from, to))
     }
+
+    def isSubtypeOf(ty: Type) = {
+      ty.isInstanceOf[TyValue] && alias <= ty.alias
+    }
+
+    def intersectAliasWith(a: Alias) = {
+      TyValue(alias intersectWith a)
+    }
   }
 
   case class TyLambda(funSym: Sym, argSym: Sym, arg: Type, res: Type, override val alias: Alias, eff: EffectSummary) extends Type(alias) {
@@ -134,6 +176,17 @@ object Backend {
 
     def subst(from: Exp, to: Exp) = {
       TyLambda(funSym, argSym, arg, res.subst(from, to), alias.subst(from, to), eff.subst(from, to))
+    }
+
+    def isSubtypeOf(ty: Type): Boolean = {
+      if (!(alias <= ty.alias)) return false
+      if (ty.isInstanceOf[TyValue]) return true
+      val lam = ty.asInstanceOf[TyLambda]
+      (lam.arg isSubtypeOf arg) && (res isSubtypeOf lam.res)
+    }
+
+    def intersectAliasWith(a: Alias) = {
+      TyLambda(funSym, argSym, arg, res, alias intersectWith a, eff)
     }
   }
 
@@ -448,7 +501,7 @@ class Frontend {
 
   implicit def lift(x: Any) = {
     val s = g.freshSym
-    g.reflect(s, "", Const(x))(TyValue(Untracked))(Set())(EmptyEffect)
+    g.reflect(s, "", Const(x))(TyValue(Tracked(Set())))(Set())(EmptyEffect)
   }
 
   def print(io: Exp, x: Exp) = {
@@ -533,6 +586,8 @@ class Frontend {
       EffectSummary(init, read, write, kill)
     }
   }
+
+  val emptyEffect = FrontendEffect(Set(), Set(), Set(), Set())
 
   abstract class FrontendType {
     def substFun(lv: Int, to: Exp): FrontendType
@@ -622,6 +677,12 @@ class Frontend {
       val s = g.freshSym
       val node = g.getNode(f.asInstanceOf[Sym]).get
       val ty = node.ty.asInstanceOf[TyLambda]
+
+      val actualType = g.getNode(x.asInstanceOf[Sym]).get.ty
+
+      if (!(actualType.intersectAliasWith(node.ty.alias) isSubtypeOf ty.arg)) {
+        println(s"[Type Error]\n  Required (${ty.argSym}): ${ty.arg}\n    Actual ($x): $actualType")
+      }
 
       // The function is in the form f(x:#) => #^{f}.
       // replace `f` in the alias set of result with the function symbol (not sure)
