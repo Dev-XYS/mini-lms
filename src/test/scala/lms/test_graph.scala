@@ -133,7 +133,7 @@ class GraphTests extends FunSuite {
         val gen = fun(rwk) { (f: Rep) =>
           f(1)
         }
-        val g = fun() { (x: Rep) =>
+        val g = fun(uv) { (x: Rep) =>
           {
             print(store, x)
             x
@@ -174,8 +174,8 @@ class GraphTests extends FunSuite {
 
   test("pair encoding") {
     val snippet = new Snippet {
-      val tySelect = FrontendLambda(tv, FrontendLambda(tv, tv, FrontendUntracked, emptyEffect), FrontendUntracked, emptyEffect)
-      val tyPair = FrontendLambda(tySelect, tv, FrontendUntracked, emptyEffect)
+      val tySelect = FrontendLambda(tv, FrontendLambda(tv, tv, FrontendTracked(Set(RefArg(0))), emptyEffect), FrontendTracked(Set()), emptyEffect)
+      val tyPair = FrontendLambda(tySelect, tv, FrontendTracked(Set()), emptyEffect)
 
       def main(world: Rep) = {
         val pair = fun() { (a: Rep) =>

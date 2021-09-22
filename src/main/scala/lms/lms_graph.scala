@@ -6,23 +6,43 @@ import java.io._
 object Backend {
 
   abstract class Def {}
-  abstract class Exp extends Def
+  abstract class Exp extends Def with Ordered[Exp] {
+    def compare(that: Exp) = {
+      orderingExp.compare(this, that)
+    }
+  }
 
   case class Sym(n: Int) extends Exp {
     override def toString =
-      if (n == -1) "x*"
+      if (n < 0) s"x{$n}"
       else s"x$n"
+
+    def isFunLevel = n < 0 && (n & 1) == 1
+    def isArgLevel = n < 0 && (n & 1) == 0
   }
   case class Const(x: Any) extends Exp {
     override def toString = x.toString
   }
 
+  // order symbols by the size of scope (de Bruijn levels)
   implicit val orderingExp: Ordering[Exp] = Ordering.by(e =>
     e match {
-      case Const(s) => -s.##.abs
-      case Sym(n)   => n
+      case s: Sym => if (s.isFunLevel) -s.n else 0
+      case _      => 0
     }
   )
+
+  def qualifierSetCompareLte(s1: Set[Exp], s2: Set[Exp]) = {
+    if (s1.isEmpty) true
+    else {
+      if (s2.isEmpty) false
+      else {
+        s1.max <= s2.max &&
+        ((s2.max.asInstanceOf[Sym].isFunLevel) ||
+          (s1.filter(!_.asInstanceOf[Sym].isFunLevel) subsetOf s2.filter(!_.asInstanceOf[Sym].isFunLevel)))
+      }
+    }
+  }
 
   abstract class Alias {
     def excluding(keys: Set[Exp]): Alias
@@ -57,11 +77,9 @@ object Backend {
 
     def aliasSet = Set.empty
 
-    def <=(rhs: Alias) = {
-      rhs == Untracked
-    }
+    def <=(rhs: Alias) = true
 
-    def intersectWith(a: Alias) = a
+    def intersectWith(a: Alias) = Untracked
   }
 
   case class Tracked(aliases: Set[Exp]) extends Alias {
@@ -87,13 +105,15 @@ object Backend {
 
     def aliasSet = aliases
 
-    def <=(rhs: Alias) = {
-      rhs == Untracked || (aliases subsetOf rhs.asInstanceOf[Tracked].aliases)
+    def <=(rhs: Alias): Boolean = {
+      if (rhs == Untracked) return false
+      val _aliases = rhs.asInstanceOf[Tracked].aliases
+      qualifierSetCompareLte(aliases, _aliases)
     }
 
     def intersectWith(a: Alias) = {
       if (a == Untracked) {
-        Tracked(aliases)
+        Untracked
       } else {
         val Tracked(as) = a
         Tracked(aliases intersect as)
@@ -145,7 +165,7 @@ object Backend {
     }
 
     def isSubtypeOf(ty: Type) = {
-      ty.isInstanceOf[TyValue] && alias <= ty.alias
+      ty.isInstanceOf[TyValue] && (alias <= ty.alias)
     }
 
     def intersectAliasWith(a: Alias) = {
@@ -182,12 +202,31 @@ object Backend {
       if (!(alias <= ty.alias)) return false
       if (ty.isInstanceOf[TyValue]) return true
       val lam = ty.asInstanceOf[TyLambda]
-      (lam.arg isSubtypeOf arg) && (res isSubtypeOf lam.res)
+      (lam.arg isSubtypeOf arg) && (res isSubtypeOf lam.res) && (eff <= lam.eff)
     }
 
     def intersectAliasWith(a: Alias) = {
       TyLambda(funSym, argSym, arg, res, alias intersectWith a, eff)
     }
+  }
+
+  // convert a type to its (reversed) de Bruijn representation (for self references in subtype checking)
+  def toDeBruijn(ty: Type) = {
+    def helper(ty: Type, lv: Int): Type = {
+      ty match {
+        case TyValue(alias) => TyValue(alias)
+        case TyLambda(funSym, argSym, arg, res, alias, eff) =>
+          TyLambda(
+            funSym,
+            argSym,
+            helper(arg, lv - 1),
+            helper(res.subst(funSym, Sym(lv * 2 + 1)).subst(argSym, Sym(lv * 2)), lv - 1),
+            alias.subst(funSym, Sym(lv * 2 + 1)).subst(argSym, Sym(lv * 2)),
+            eff.subst(funSym, Sym(lv * 2 + 1)).subst(argSym, Sym(lv * 2))
+          )
+      }
+    }
+    helper(ty, -1)
   }
 
   case class Node(s: Sym, op: String, rhs: List[Def], ty: Type, deps: Dependency) {
@@ -250,6 +289,13 @@ object Backend {
         write map (x => if (x == from) to else x),
         kill map (x => if (x == from) to else x)
       )
+    }
+
+    def <=(eff: EffectSummary) = {
+      qualifierSetCompareLte(init, eff.init) &&
+      qualifierSetCompareLte(read, eff.read) &&
+      qualifierSetCompareLte(write, eff.write) &&
+      qualifierSetCompareLte(kill, eff.kill)
     }
   }
 
@@ -501,7 +547,7 @@ class Frontend {
 
   implicit def lift(x: Any) = {
     val s = g.freshSym
-    g.reflect(s, "", Const(x))(TyValue(Tracked(Set())))(Set())(EmptyEffect)
+    g.reflect(s, "", Const(x))(TyValue(Untracked))(Set())(EmptyEffect)
   }
 
   def print(io: Exp, x: Exp) = {
@@ -678,10 +724,11 @@ class Frontend {
       val node = g.getNode(f.asInstanceOf[Sym]).get
       val ty = node.ty.asInstanceOf[TyLambda]
 
-      val actualType = g.getNode(x.asInstanceOf[Sym]).get.ty
+      val actualType = toDeBruijn(g.getNode(x.asInstanceOf[Sym]).get.ty).intersectAliasWith(node.ty.alias)
+      val requiredType = toDeBruijn(ty.arg)
 
-      if (!(actualType.intersectAliasWith(node.ty.alias) isSubtypeOf ty.arg)) {
-        println(s"[Type Error]\n  Required (${ty.argSym}): ${ty.arg}\n    Actual ($x): $actualType")
+      if (!(actualType isSubtypeOf requiredType)) {
+        println(s"[Type Error]\n  Required (${ty.argSym}): $requiredType\n    Actual ($x): $actualType")
       }
 
       // The function is in the form f(x:#) => #^{f}.
