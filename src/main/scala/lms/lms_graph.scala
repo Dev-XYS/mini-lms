@@ -6,56 +6,53 @@ import java.io._
 object Backend {
 
   abstract class Def {}
-  abstract class Exp extends Def with Ordered[Exp] {
-    def compare(that: Exp) = {
-      orderingExp.compare(this, that)
-    }
-  }
 
-  case class Sym(n: Int) extends Exp {
+  abstract class AllSym extends Def {} // for `RefFun` and `RefArg` types in the frontend
+
+  case class Sym(n: Int) extends AllSym with Ordered[Sym] {
     override def toString =
       if (n < 0) s"x{$n}"
       else s"x$n"
 
     def isFunLevel = n < 0 && (n & 1) == 1
     def isArgLevel = n < 0 && (n & 1) == 0
+
+    def compare(that: Sym) = {
+      orderingSym.compare(this, that)
+    }
   }
-  case class Const(x: Any) extends Exp {
+
+  case class Const(x: Any) extends Def {
     override def toString = x.toString
   }
 
   // order symbols by the size of scope (de Bruijn levels)
-  implicit val orderingExp: Ordering[Exp] = Ordering.by(e =>
-    e match {
-      case s: Sym => if (s.isFunLevel) -s.n else 0
-      case _      => 0
-    }
-  )
+  implicit val orderingSym: Ordering[Sym] = Ordering.by(s => if (s.isFunLevel) -s.n else 0)
 
-  def qualifierSetCompareLte(s1: Set[Exp], s2: Set[Exp]) = {
+  def qualifierSetCompareLte(s1: Set[Sym], s2: Set[Sym]) = {
     if (s1.isEmpty) true
     else {
       if (s2.isEmpty) false
       else {
         s1.max <= s2.max &&
-        ((s2.max.asInstanceOf[Sym].isFunLevel) ||
-          (s1.filter(!_.asInstanceOf[Sym].isFunLevel) subsetOf s2.filter(!_.asInstanceOf[Sym].isFunLevel)))
+        ((s2.max.isFunLevel) ||
+          (s1.filter(!_.isFunLevel) subsetOf s2.filter(!_.isFunLevel)))
       }
     }
   }
 
   abstract class Alias {
-    def excluding(keys: Set[Exp]): Alias
+    def excluding(keys: Set[Sym]): Alias
 
     def tracked: Boolean
 
-    def ++(keys: Set[Exp]): Alias
+    def ++(keys: Set[Sym]): Alias
 
-    def contains(key: Exp): Boolean
+    def contains(key: Sym): Boolean
 
-    def subst(from: Exp, to: Exp): Alias
+    def subst(from: Sym, to: Sym): Alias
 
-    def aliasSet: Set[Exp]
+    def aliasSet: Set[Sym]
 
     def <=(rhs: Alias): Boolean
 
@@ -65,15 +62,15 @@ object Backend {
   case object Untracked extends Alias {
     override def toString = ""
 
-    def excluding(keys: Set[Exp]) = Untracked
+    def excluding(keys: Set[Sym]) = Untracked
 
     def tracked = false
 
-    def ++(keys: Set[Exp]) = Untracked
+    def ++(keys: Set[Sym]) = Untracked
 
-    def contains(key: Exp) = false
+    def contains(key: Sym) = false
 
-    def subst(from: Exp, to: Exp) = Untracked
+    def subst(from: Sym, to: Sym) = Untracked
 
     def aliasSet = Set.empty
 
@@ -82,24 +79,24 @@ object Backend {
     def intersectWith(a: Alias) = Untracked
   }
 
-  case class Tracked(aliases: Set[Exp]) extends Alias {
+  case class Tracked(aliases: Set[Sym]) extends Alias {
     override def toString = s"^{${aliases.mkString(" ")}}"
 
-    def excluding(keys: Set[Exp]) = {
+    def excluding(keys: Set[Sym]) = {
       Tracked(aliases -- keys)
     }
 
     def tracked = true
 
-    def ++(keys: Set[Exp]) = {
+    def ++(keys: Set[Sym]) = {
       Tracked(aliases ++ keys)
     }
 
-    def contains(key: Exp) = {
+    def contains(key: Sym) = {
       aliases.contains(key)
     }
 
-    def subst(from: Exp, to: Exp) = {
+    def subst(from: Sym, to: Sym) = {
       Tracked(aliases map (x => if (x == from) to else x))
     }
 
@@ -124,15 +121,15 @@ object Backend {
   abstract class Type(val alias: Alias) {
     def withNewAlias(alias: Alias): Type
 
-    def excludeKeys(keys: Set[Exp]): Type
+    def excludeKeys(keys: Set[Sym]): Type
 
     def tracked = alias.tracked
 
-    def withAdditionalAlias(keys: Set[Exp]): Type
+    def withAdditionalAlias(keys: Set[Sym]): Type
 
-    def substAlias(from: Exp, to: Exp): Type
+    def substAlias(from: Sym, to: Sym): Type
 
-    def subst(from: Exp, to: Exp): Type
+    def subst(from: Sym, to: Sym): Type
 
     def isSubtypeOf(ty: Type): Boolean
 
@@ -148,19 +145,19 @@ object Backend {
       TyValue(alias)
     }
 
-    def excludeKeys(keys: Set[Exp]) = {
+    def excludeKeys(keys: Set[Sym]) = {
       TyValue(alias excluding keys)
     }
 
-    def withAdditionalAlias(keys: Set[Exp]) = {
+    def withAdditionalAlias(keys: Set[Sym]) = {
       TyValue(alias ++ keys)
     }
 
-    def substAlias(from: Exp, to: Exp) = {
+    def substAlias(from: Sym, to: Sym) = {
       TyValue(alias.subst(from, to))
     }
 
-    def subst(from: Exp, to: Exp) = {
+    def subst(from: Sym, to: Sym) = {
       TyValue(alias.subst(from, to))
     }
 
@@ -182,19 +179,19 @@ object Backend {
       TyLambda(funSym, argSym, arg, res, alias, eff)
     }
 
-    def excludeKeys(keys: Set[Exp]) = {
+    def excludeKeys(keys: Set[Sym]) = {
       TyLambda(funSym, argSym, arg excludeKeys (keys - funSym - argSym), res excludeKeys (keys - funSym - argSym), alias excluding keys, eff excluding (keys - funSym - argSym))
     }
 
-    def withAdditionalAlias(keys: Set[Exp]) = {
+    def withAdditionalAlias(keys: Set[Sym]) = {
       TyLambda(funSym, argSym, arg, res, alias ++ keys, eff)
     }
 
-    def substAlias(from: Exp, to: Exp) = {
+    def substAlias(from: Sym, to: Sym) = {
       TyLambda(funSym, argSym, arg, res, alias.subst(from, to), eff)
     }
 
-    def subst(from: Exp, to: Exp) = {
+    def subst(from: Sym, to: Sym) = {
       TyLambda(funSym, argSym, arg, res.subst(from, to), alias.subst(from, to), eff.subst(from, to))
     }
 
@@ -239,21 +236,21 @@ object Backend {
         s"$s = $op(${rhs.mkString(" ")}), type: $ty, deps: { $deps }"
   }
 
-  case class Block(in: List[Sym], res: Exp, ein: Sym, eff: EffectSummary, deps: Dependency, used: Set[Exp], defined: Set[Exp]) extends Def {
+  case class Block(in: List[Sym], res: Sym, ein: Sym, eff: EffectSummary, deps: Dependency, used: Set[Sym], defined: Set[Sym]) extends Def {
     override def toString = s"Block(in: [${in.mkString(" ")}], result: $res, effect: { $eff }, deps: { $deps })"
   }
 
-  case class Dependency(hdeps: Map[Exp, Set[Exp]], sdeps: Map[Exp, Set[Exp]]) {
+  case class Dependency(hdeps: Map[Sym, Set[Sym]], sdeps: Map[Sym, Set[Sym]]) {
     override def toString = s"hard: {${hdeps.mkString(" ")}}, soft: {${sdeps.mkString(" ")}}"
   }
 
   object Dependency {
-    def fromMutable(hdeps: mutable.Map[Exp, mutable.Set[Exp]], sdeps: mutable.Map[Exp, mutable.Set[Exp]]) = {
+    def fromMutable(hdeps: mutable.Map[Sym, mutable.Set[Sym]], sdeps: mutable.Map[Sym, mutable.Set[Sym]]) = {
       Dependency(Map(hdeps.toSeq.map({ case (k, v) => (k, Set(v.toSeq: _*)) }): _*), Map(sdeps.toSeq.map({ case (k, v) => (k, Set(v.toSeq: _*)) }): _*))
     }
   }
 
-  case class EffectSummary(init: Set[Exp], read: Set[Exp], write: Set[Exp], kill: Set[Exp]) {
+  case class EffectSummary(init: Set[Sym], read: Set[Sym], write: Set[Sym], kill: Set[Sym]) {
     override def toString = s"init: [${init.mkString(" ")}], read: [${read.mkString(" ")}], write: [${write.mkString(" ")}], kill: [${kill.mkString(" ")}]"
 
     def mergeWith(eff: EffectSummary) =
@@ -276,13 +273,13 @@ object Backend {
 
     def +(eff: EffectSummary) = EffectSummary(init ++ eff.init, read ++ eff.read, write ++ eff.write, kill ++ eff.kill)
 
-    def excluding(keys: Set[Exp]) = {
+    def excluding(keys: Set[Sym]) = {
       EffectSummary(init -- keys, read -- keys, write -- keys, kill -- keys)
     }
 
     def isEmpty: Boolean = init.isEmpty && read.isEmpty && write.isEmpty && kill.isEmpty
 
-    def subst(from: Exp, to: Exp) = {
+    def subst(from: Sym, to: Sym) = {
       EffectSummary(
         init map (x => if (x == from) to else x),
         read map (x => if (x == from) to else x),
@@ -329,13 +326,13 @@ class GraphBuilder {
 
   var localEffects: EffectSummary = EmptyEffect
 
-  var localUsed = mutable.Set[Exp]()
-  var localDefined = mutable.Set[Exp]()
+  var localUsed = mutable.Set[Sym]()
+  var localDefined = mutable.Set[Sym]()
 
-  var initSym = mutable.Map[Exp, Exp]()
-  var lastRead = mutable.Map[Exp, mutable.Set[Exp]]()
-  var lastWrite = mutable.Map[Exp, Exp]()
-  var killAt = mutable.Map[Exp, Exp]()
+  var initSym = mutable.Map[Sym, Sym]()
+  var lastRead = mutable.Map[Sym, mutable.Set[Sym]]()
+  var lastWrite = mutable.Map[Sym, Sym]()
+  var killAt = mutable.Map[Sym, Sym]()
 
   // end local definitions
 
@@ -345,11 +342,11 @@ class GraphBuilder {
 
   def freshSym = Sym(fresh)
 
-  def reflect(s: Sym, op: String, as: Def*)(ty: Type)(used: Set[Exp])(eff: EffectSummary) = {
+  def reflect(s: Sym, op: String, as: Def*)(ty: Type)(used: Set[Sym])(eff: EffectSummary) = {
     // compute dependencies
 
-    val hdeps = mutable.Map[Exp, mutable.Set[Exp]]()
-    val sdeps = mutable.Map[Exp, mutable.Set[Exp]]()
+    val hdeps = mutable.Map[Sym, mutable.Set[Sym]]()
+    val sdeps = mutable.Map[Sym, mutable.Set[Sym]]()
 
     // compute aliases: all aliases have the same effect
     val init = transitiveAlias(eff.init)
@@ -406,7 +403,7 @@ class GraphBuilder {
     s
   }
 
-  def reify(f: Exp => Exp, x: Sym, tyArg: Type) = withScope {
+  def reify(f: Sym => Sym, x: Sym, tyArg: Type) = withScope {
     // set current `ein` (for now, it is the same as the function argument)
     ein = x
 
@@ -418,8 +415,8 @@ class GraphBuilder {
 
     // compute dependencies for the whole block
 
-    val hdeps = mutable.Map[Exp, mutable.Set[Exp]]()
-    val sdeps = mutable.Map[Exp, mutable.Set[Exp]]()
+    val hdeps = mutable.Map[Sym, mutable.Set[Sym]]()
+    val sdeps = mutable.Map[Sym, mutable.Set[Sym]]()
 
     for ((key, rs) <- lastRead) {
       sdeps(key) = rs
@@ -444,7 +441,7 @@ class GraphBuilder {
     Block(List(x), res, x, localEffects, Dependency.fromMutable(hdeps, sdeps), Set(localUsed.toSeq: _*), Set(localDefined.toSeq: _*))
   }
 
-  def lastWriteOrInit(x: Exp) = {
+  def lastWriteOrInit(x: Sym) = {
     lastWrite.getOrElse(x, initSym.getOrElse(x, ein))
   }
 
@@ -486,9 +483,9 @@ class GraphBuilder {
     globalDefs.find(_.s == s)
   }
 
-  def transitiveAlias(aliases: Set[Exp]): Set[Exp] = {
-    val res = mutable.Set[Exp]()
-    def helper(set: Set[Exp]) {
+  def transitiveAlias(aliases: Set[Sym]): Set[Sym] = {
+    val res = mutable.Set[Sym]()
+    def helper(set: Set[Sym]) {
       for (x <- set) {
         if (x.isInstanceOf[Sym]) {
           val s = x.asInstanceOf[Sym]
@@ -511,7 +508,7 @@ class GraphBuilder {
    * Calculate the result type when leaving a scope.
    * (Rewiring, eliminating local symbols, ...)
    * */
-  def leavingScope(ty: Type, locals: Set[Exp]) = {
+  def leavingScope(ty: Type, locals: Set[Sym]) = {
     (ty match {
       case TyLambda(funSym, argSym, arg, res, alias, eff) => {
         locals
@@ -527,15 +524,15 @@ class Frontend {
 
   val g = new GraphBuilder
 
-  def InitEffect(x: Exp) = EffectSummary(Set(x), Set(), Set(), Set())
-  def ReadEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(), Set())
-  def WriteEffect(x: Exp) = EffectSummary(Set(), Set(), Set(x), Set())
-  def ReadWriteEffect(x: Exp) = EffectSummary(Set(), Set(x), Set(x), Set())
-  def KillEffect(x: Exp) = EffectSummary(Set(), Set(), Set(), Set(x))
+  def InitEffect(x: Sym) = EffectSummary(Set(x), Set(), Set(), Set())
+  def ReadEffect(x: Sym) = EffectSummary(Set(), Set(x), Set(), Set())
+  def WriteEffect(x: Sym) = EffectSummary(Set(), Set(), Set(x), Set())
+  def ReadWriteEffect(x: Sym) = EffectSummary(Set(), Set(x), Set(x), Set())
+  def KillEffect(x: Sym) = EffectSummary(Set(), Set(), Set(), Set(x))
 
   // user-accessible functions
 
-  def getGraph(f: Exp => Exp) = {
+  def getGraph(f: Sym => Sym) = {
     val x = g.freshSym // always assume one tracked argument for now
     val block = g.reify(f, x, TyValue(Tracked(Set(x))))
     Graph(g.globalDefs.toList, block)
@@ -543,75 +540,75 @@ class Frontend {
 
   // program constructs
 
-  type Rep = Exp
+  type Rep = Sym
 
   implicit def lift(x: Any) = {
     val s = g.freshSym
     g.reflect(s, "", Const(x))(TyValue(Untracked))(Set())(EmptyEffect)
   }
 
-  def print(io: Exp, x: Exp) = {
+  def print(io: Sym, x: Sym) = {
     val s = g.freshSym
     g.reflect(s, "print", io, x)(TyValue(Untracked))(Set(io, x))(ReadWriteEffect(io))
   }
 
-  def alloc(x: Exp) = {
+  def alloc(x: Sym) = {
     val s = g.freshSym
     g.reflect(s, "alloc", x)(TyValue(Tracked(Set(s))))(Set(x))(ReadEffect(x) + InitEffect(s))
   }
 
-  def get(x: Exp) = {
+  def get(x: Sym) = {
     val s = g.freshSym
     g.reflect(s, "get", x)(TyValue(Untracked))(Set(x))(ReadEffect(x))
   }
 
-  def set(x: Exp, v: Exp) = {
+  def set(x: Sym, v: Sym) = {
     val s = g.freshSym
     g.reflect(s, "set", x, v)(TyValue(Untracked))(Set(x, v))(WriteEffect(x))
   }
 
-  def inc(x: Exp) = {
+  def inc(x: Sym) = {
     val s = g.freshSym
     g.reflect(s, "inc", x)(TyValue(Untracked))(Set(x))(ReadWriteEffect(x))
   }
 
-  def free(x: Exp) = {
+  def free(x: Sym) = {
     val s = g.freshSym
     g.reflect(s, "free", x)(TyValue(Untracked))(Set(x))(KillEffect(x))
   }
 
   // begin type annotations
 
-  case class RefFun(lv: Int) extends Exp
-  case class RefArg(lv: Int) extends Exp
+  case class RefFun(lv: Int) extends AllSym
+  case class RefArg(lv: Int) extends AllSym
 
   abstract class FrontendAlias {
-    def substFun(lv: Int, to: Exp): FrontendAlias
-    def substArg(lv: Int, to: Exp): FrontendAlias
+    def substFun(lv: Int, to: Sym): FrontendAlias
+    def substArg(lv: Int, to: Sym): FrontendAlias
 
     def convert: Alias
   }
 
   case object FrontendUntracked extends FrontendAlias {
-    def substFun(lv: Int, to: Exp) = FrontendUntracked
-    def substArg(lv: Int, to: Exp) = FrontendUntracked
+    def substFun(lv: Int, to: Sym) = FrontendUntracked
+    def substArg(lv: Int, to: Sym) = FrontendUntracked
 
     def convert = Untracked
   }
 
-  case class FrontendTracked(aliases: Set[Exp]) extends FrontendAlias {
-    def substFun(lv: Int, to: Exp) = {
+  case class FrontendTracked(aliases: Set[AllSym]) extends FrontendAlias {
+    def substFun(lv: Int, to: Sym) = {
       FrontendTracked(aliases map (x => if (x == RefFun(lv)) to else x))
     }
-    def substArg(lv: Int, to: Exp) = {
+    def substArg(lv: Int, to: Sym) = {
       FrontendTracked(aliases map (x => if (x == RefArg(lv)) to else x))
     }
 
-    def convert = Tracked(aliases)
+    def convert = Tracked(aliases.map({ case x: Sym => x }))
   }
 
-  case class FrontendEffect(init: Set[Exp], read: Set[Exp], write: Set[Exp], kill: Set[Exp]) {
-    def substFun(lv: Int, to: Exp) = {
+  case class FrontendEffect(init: Set[AllSym], read: Set[AllSym], write: Set[AllSym], kill: Set[AllSym]) {
+    def substFun(lv: Int, to: Sym) = {
       FrontendEffect(
         init map (x => if (x == RefFun(lv)) to else x),
         read map (x => if (x == RefFun(lv)) to else x),
@@ -619,7 +616,7 @@ class Frontend {
         kill map (x => if (x == RefFun(lv)) to else x)
       )
     }
-    def substArg(lv: Int, to: Exp) = {
+    def substArg(lv: Int, to: Sym) = {
       FrontendEffect(
         init map (x => if (x == RefArg(lv)) to else x),
         read map (x => if (x == RefArg(lv)) to else x),
@@ -629,30 +626,30 @@ class Frontend {
     }
 
     def convert = {
-      EffectSummary(init, read, write, kill)
+      EffectSummary(init.map({ case x: Sym => x }), read.map({ case x: Sym => x }), write.map({ case x: Sym => x }), kill.map({ case x: Sym => x }))
     }
   }
 
   val emptyEffect = FrontendEffect(Set(), Set(), Set(), Set())
 
   abstract class FrontendType {
-    def substFun(lv: Int, to: Exp): FrontendType
-    def substArg(lv: Int, to: Exp): FrontendType
+    def substFun(lv: Int, to: Sym): FrontendType
+    def substArg(lv: Int, to: Sym): FrontendType
   }
 
   case class FrontendValue(alias: FrontendAlias) extends FrontendType {
-    def substFun(lv: Int, to: Exp) = {
+    def substFun(lv: Int, to: Sym) = {
       FrontendValue(alias.substFun(lv, to))
     }
-    def substArg(lv: Int, to: Exp) = {
+    def substArg(lv: Int, to: Sym) = {
       FrontendValue(alias.substArg(lv, to))
     }
   }
   case class FrontendLambda(arg: FrontendType, res: FrontendType, alias: FrontendAlias, eff: FrontendEffect) extends FrontendType {
-    def substFun(lv: Int, to: Exp) = {
+    def substFun(lv: Int, to: Sym) = {
       FrontendLambda(arg.substFun(lv + 1, to), res.substFun(lv + 1, to), alias.substFun(lv, to), eff.substFun(lv, to))
     }
-    def substArg(lv: Int, to: Exp) = {
+    def substArg(lv: Int, to: Sym) = {
       FrontendLambda(arg.substArg(lv + 1, to), res.substArg(lv + 1, to), alias.substArg(lv, to), eff.substArg(lv, to))
     }
   }
@@ -688,7 +685,7 @@ class Frontend {
 
   // end type annotations
 
-  def fun(_tyArg: FrontendType = tv)(f: Exp => Exp) = {
+  def fun(_tyArg: FrontendType = tv)(f: Sym => Sym) = {
     val s = g.freshSym
     val x = g.freshSym // symbol for the argument
 
@@ -723,8 +720,8 @@ class Frontend {
     )(Set())(if ((lamEff excluding block.in.toSet).isEmpty) EmptyEffect else InitEffect(s) /* If a function closes over something, it has an init effect. (not sure) */ )
   }
 
-  implicit class Lambda(f: Exp) {
-    def apply(x: Exp) = {
+  implicit class Lambda(f: Sym) {
+    def apply(x: Sym) = {
       val s = g.freshSym
       val node = g.getNode(f.asInstanceOf[Sym]).get
       val ty = node.ty.asInstanceOf[TyLambda]
