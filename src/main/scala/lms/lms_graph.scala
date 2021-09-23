@@ -42,17 +42,13 @@ object Backend {
   }
 
   abstract class Alias {
-    def excluding(keys: Set[Sym]): Alias
-
     def tracked: Boolean
+    def aliasSet: Set[Sym]
 
     def ++(keys: Set[Sym]): Alias
-
-    def contains(key: Sym): Boolean
+    def --(keys: Set[Sym]): Alias
 
     def subst(from: Sym, to: Sym): Alias
-
-    def aliasSet: Set[Sym]
 
     def <=(rhs: Alias): Boolean
 
@@ -62,17 +58,13 @@ object Backend {
   case object Untracked extends Alias {
     override def toString = ""
 
-    def excluding(keys: Set[Sym]) = Untracked
-
     def tracked = false
+    def aliasSet = Set.empty
 
     def ++(keys: Set[Sym]) = Untracked
-
-    def contains(key: Sym) = false
+    def --(keys: Set[Sym]) = Untracked
 
     def subst(from: Sym, to: Sym) = Untracked
-
-    def aliasSet = Set.empty
 
     def <=(rhs: Alias) = true
 
@@ -82,25 +74,19 @@ object Backend {
   case class Tracked(aliases: Set[Sym]) extends Alias {
     override def toString = s"^{${aliases.mkString(" ")}}"
 
-    def excluding(keys: Set[Sym]) = {
-      Tracked(aliases -- keys)
-    }
-
     def tracked = true
+    def aliasSet = aliases
 
     def ++(keys: Set[Sym]) = {
       Tracked(aliases ++ keys)
     }
-
-    def contains(key: Sym) = {
-      aliases.contains(key)
+    def --(keys: Set[Sym]) = {
+      Tracked(aliases -- keys)
     }
 
     def subst(from: Sym, to: Sym) = {
       Tracked(aliases map (x => if (x == from) to else x))
     }
-
-    def aliasSet = aliases
 
     def <=(rhs: Alias): Boolean = {
       if (rhs == Untracked) return false
@@ -119,15 +105,11 @@ object Backend {
   }
 
   abstract class Type(val alias: Alias) {
-    def withNewAlias(alias: Alias): Type
-
     def excludeKeys(keys: Set[Sym]): Type
 
     def tracked = alias.tracked
 
     def withAdditionalAlias(keys: Set[Sym]): Type
-
-    def substAlias(from: Sym, to: Sym): Type
 
     def subst(from: Sym, to: Sym): Type
 
@@ -141,20 +123,12 @@ object Backend {
       s"#$alias"
     }
 
-    def withNewAlias(alias: Alias) = {
-      TyValue(alias)
-    }
-
     def excludeKeys(keys: Set[Sym]) = {
-      TyValue(alias excluding keys)
+      TyValue(alias -- keys)
     }
 
     def withAdditionalAlias(keys: Set[Sym]) = {
       TyValue(alias ++ keys)
-    }
-
-    def substAlias(from: Sym, to: Sym) = {
-      TyValue(alias.subst(from, to))
     }
 
     def subst(from: Sym, to: Sym) = {
@@ -175,20 +149,12 @@ object Backend {
       s"$funSym($argSym:$arg => $res)$alias ^^{ $eff }"
     }
 
-    def withNewAlias(alias: Alias) = {
-      TyLambda(funSym, argSym, arg, res, alias, eff)
-    }
-
     def excludeKeys(keys: Set[Sym]) = {
-      TyLambda(funSym, argSym, arg excludeKeys (keys - funSym - argSym), res excludeKeys (keys - funSym - argSym), alias excluding keys, eff excluding (keys - funSym - argSym))
+      TyLambda(funSym, argSym, arg excludeKeys (keys - funSym - argSym), res excludeKeys (keys - funSym - argSym), alias -- keys, eff excluding (keys - funSym - argSym))
     }
 
     def withAdditionalAlias(keys: Set[Sym]) = {
       TyLambda(funSym, argSym, arg, res, alias ++ keys, eff)
-    }
-
-    def substAlias(from: Sym, to: Sym) = {
-      TyLambda(funSym, argSym, arg, res, alias.subst(from, to), eff)
     }
 
     def subst(from: Sym, to: Sym) = {
@@ -754,6 +720,7 @@ class Frontend {
 
       // reflect
       // (If an application returns a tracked value, it must at least alias itself.)
+      // (really?)
       g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(eff)
     }
   }
