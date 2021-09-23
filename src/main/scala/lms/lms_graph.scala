@@ -336,10 +336,12 @@ class GraphBuilder {
     }
 
     for (r <- read) {
+      if (killAt contains r) println(s"[Error] Cannot access dead object $r at $s")
       lastRead.getOrElseUpdate(r, mutable.Set()) += s
     }
 
     for (w <- write) {
+      if (killAt contains w) println(s"[Error] Cannot access dead object $w at $s")
       lastWrite(w) = s
       lastRead(w) = mutable.Set()
     }
