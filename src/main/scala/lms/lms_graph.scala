@@ -216,16 +216,11 @@ object Backend {
     }
   }
 
-  case class EffectSummary(init: Set[Sym], read: Set[Sym], write: Set[Sym], kill: Set[Sym]) {
-    override def toString = s"init: [${init.mkString(" ")}], read: [${read.mkString(" ")}], write: [${write.mkString(" ")}], kill: [${kill.mkString(" ")}]"
+  case class EffectSummary(read: Set[Sym], write: Set[Sym], kill: Set[Sym]) {
+    override def toString = s"read: [${read.mkString(" ")}], write: [${write.mkString(" ")}], kill: [${kill.mkString(" ")}]"
 
     def mergeWith(eff: EffectSummary) =
       EffectSummary(
-        init
-          ++ eff.init
-          -- eff.write // write overrides init
-          -- eff.kill // kill overrides init
-        ,
         read
           ++ (eff.read -- write) // If a key has already been written to, read has no global effect on it.
         ,
@@ -237,17 +232,16 @@ object Backend {
           ++ eff.kill
       )
 
-    def +(eff: EffectSummary) = EffectSummary(init ++ eff.init, read ++ eff.read, write ++ eff.write, kill ++ eff.kill)
+    def +(eff: EffectSummary) = EffectSummary(read ++ eff.read, write ++ eff.write, kill ++ eff.kill)
 
     def excluding(keys: Set[Sym]) = {
-      EffectSummary(init -- keys, read -- keys, write -- keys, kill -- keys)
+      EffectSummary(read -- keys, write -- keys, kill -- keys)
     }
 
-    def isEmpty: Boolean = init.isEmpty && read.isEmpty && write.isEmpty && kill.isEmpty
+    def isEmpty: Boolean = read.isEmpty && write.isEmpty && kill.isEmpty
 
     def subst(from: Sym, to: Sym) = {
       EffectSummary(
-        init map (x => if (x == from) to else x),
         read map (x => if (x == from) to else x),
         write map (x => if (x == from) to else x),
         kill map (x => if (x == from) to else x)
@@ -255,14 +249,13 @@ object Backend {
     }
 
     def <=(eff: EffectSummary) = {
-      qualifierSetCompareLte(init, eff.init) &&
       qualifierSetCompareLte(read, eff.read) &&
       qualifierSetCompareLte(write, eff.write) &&
       qualifierSetCompareLte(kill, eff.kill)
     }
   }
 
-  def EmptyEffect = EffectSummary(Set(), Set(), Set(), Set())
+  def EmptyEffect = EffectSummary(Set(), Set(), Set())
 
   case class Graph(nodes: List[Node], block: Block) {
     override def toString = {
@@ -315,13 +308,12 @@ class GraphBuilder {
     val sdeps = mutable.Map[Sym, mutable.Set[Sym]]()
 
     // compute aliases: all aliases have the same effect
-    val init = transitiveAlias(eff.init)
     val read = transitiveAlias(eff.read)
     val write = transitiveAlias(eff.write)
     val kill = transitiveAlias(eff.kill)
 
     // update local effects
-    localEffects = localEffects.mergeWith(EffectSummary(init, read, write, kill))
+    localEffects = localEffects.mergeWith(EffectSummary(read, write, kill))
 
     // compute dependencies
     for (r <- read) {
@@ -339,8 +331,8 @@ class GraphBuilder {
     }
 
     // update states
-    for (i <- init) {
-      initSym(i) = i
+    if (ty.tracked) {
+      initSym(s) = s
     }
 
     for (r <- read) {
@@ -490,11 +482,10 @@ class Frontend {
 
   val g = new GraphBuilder
 
-  def InitEffect(x: Sym) = EffectSummary(Set(x), Set(), Set(), Set())
-  def ReadEffect(x: Sym) = EffectSummary(Set(), Set(x), Set(), Set())
-  def WriteEffect(x: Sym) = EffectSummary(Set(), Set(), Set(x), Set())
-  def ReadWriteEffect(x: Sym) = EffectSummary(Set(), Set(x), Set(x), Set())
-  def KillEffect(x: Sym) = EffectSummary(Set(), Set(), Set(), Set(x))
+  def ReadEffect(x: Sym) = EffectSummary(Set(x), Set(), Set())
+  def WriteEffect(x: Sym) = EffectSummary(Set(), Set(x), Set())
+  def ReadWriteEffect(x: Sym) = EffectSummary(Set(x), Set(x), Set())
+  def KillEffect(x: Sym) = EffectSummary(Set(), Set(), Set(x))
 
   // user-accessible functions
 
@@ -520,7 +511,7 @@ class Frontend {
 
   def alloc(x: Sym) = {
     val s = g.freshSym
-    g.reflect(s, "alloc", x)(TyValue(Tracked(Set(s))))(Set(x))(ReadEffect(x) + InitEffect(s))
+    g.reflect(s, "alloc", x)(TyValue(Tracked(Set(s))))(Set(x))(ReadEffect(x))
   }
 
   def get(x: Sym) = {
@@ -573,10 +564,9 @@ class Frontend {
     def convert = Tracked(aliases.map({ case x: Sym => x }))
   }
 
-  case class FrontendEffect(init: Set[AllSym], read: Set[AllSym], write: Set[AllSym], kill: Set[AllSym]) {
+  case class FrontendEffect(read: Set[AllSym], write: Set[AllSym], kill: Set[AllSym]) {
     def substFun(lv: Int, to: Sym) = {
       FrontendEffect(
-        init map (x => if (x == RefFun(lv)) to else x),
         read map (x => if (x == RefFun(lv)) to else x),
         write map (x => if (x == RefFun(lv)) to else x),
         kill map (x => if (x == RefFun(lv)) to else x)
@@ -584,7 +574,6 @@ class Frontend {
     }
     def substArg(lv: Int, to: Sym) = {
       FrontendEffect(
-        init map (x => if (x == RefArg(lv)) to else x),
         read map (x => if (x == RefArg(lv)) to else x),
         write map (x => if (x == RefArg(lv)) to else x),
         kill map (x => if (x == RefArg(lv)) to else x)
@@ -592,11 +581,11 @@ class Frontend {
     }
 
     def convert = {
-      EffectSummary(init.map({ case x: Sym => x }), read.map({ case x: Sym => x }), write.map({ case x: Sym => x }), kill.map({ case x: Sym => x }))
+      EffectSummary(read.map({ case x: Sym => x }), write.map({ case x: Sym => x }), kill.map({ case x: Sym => x }))
     }
   }
 
-  val emptyEffect = FrontendEffect(Set(), Set(), Set(), Set())
+  val emptyEffect = FrontendEffect(Set(), Set(), Set())
 
   abstract class FrontendType {
     def substFun(lv: Int, to: Sym): FrontendType
@@ -622,7 +611,7 @@ class Frontend {
 
   val uv = FrontendValue(FrontendUntracked)
   val tv = FrontendValue(FrontendTracked(Set()))
-  val rwk = FrontendLambda(uv, uv, FrontendTracked(Set(RefFun(0))), FrontendEffect(Set(), Set(RefFun(0)), Set(RefFun(0)), Set(RefFun(0))))
+  val rwk = FrontendLambda(uv, uv, FrontendTracked(Set(RefFun(0))), FrontendEffect(Set(RefFun(0)), Set(RefFun(0)), Set(RefFun(0))))
 
   def convertType(ty: FrontendType): Type = {
     def helper(ty: FrontendType): Type = {
@@ -683,7 +672,7 @@ class Frontend {
         Tracked(usedNonlocal ++ (if (usedNonlocal.isEmpty) Set() else Set(s))),
         lamEff
       )
-    )(Set())(if ((lamEff excluding block.in.toSet).isEmpty) EmptyEffect else InitEffect(s) /* If a function closes over something, it has an init effect. (not sure) */ )
+    )(Set())(EmptyEffect)
   }
 
   implicit class Lambda(f: Sym) {
@@ -713,15 +702,10 @@ class Frontend {
       // The function is in the form f(x:#) => # ^^{x}
       val appEff = _appEff.subst(ty.argSym, x)
 
-      // Tracked result is initialized.
-      val eff =
-        if (tyRes.tracked) appEff + InitEffect(s)
-        else appEff
-
       // reflect
       // (If an application returns a tracked value, it must at least alias itself.)
       // (really?)
-      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(eff)
+      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(appEff)
     }
   }
 }
