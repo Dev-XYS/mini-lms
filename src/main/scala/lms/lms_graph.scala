@@ -658,7 +658,7 @@ class Frontend {
   }
 
   val uv = FrontendValue(FrontendUntracked)
-  val tv = FrontendValue(FrontendTracked(Set.empty))
+  val tv = FrontendValue(FrontendTracked(Set()))
   val rwk = FrontendLambda(uv, uv, FrontendTracked(Set(RefFun(0))), FrontendEffect(Set(), Set(RefFun(0)), Set(RefFun(0)), Set(RefFun(0))))
 
   def convertType(ty: FrontendType): Type = {
@@ -692,7 +692,12 @@ class Frontend {
     val s = g.freshSym
     val x = g.freshSym // symbol for the argument
 
-    val tyArg = convertType(_tyArg)
+    var tyArg = convertType(_tyArg)
+
+    // needs further checking: if the argument is a tracked value, it must track itself
+    tyArg =
+      if (tyArg.isInstanceOf[TyValue] && tyArg.tracked) tyArg.withAdditionalAlias(Set(x))
+      else tyArg
 
     // add dummy argument to node list
     g.globalDefs += Node(x, "(arg)", List(), tyArg, Dependency(Map(), Map()))
@@ -733,15 +738,11 @@ class Frontend {
 
       // The function is in the form f(x:#) => #^{f}.
       // replace `f` in the alias set of result with the function symbol (not sure)
-      val _tyRes =
-        if (ty.res.alias.contains(ty.funSym)) ty.res.substAlias(ty.funSym, f)
-        else ty.res
+      val _tyRes = ty.res.subst(ty.funSym, f)
 
       // The function is in the form f(x:#) => #^{x}.
       // replace `x` in the alias set of result with the argument symbol
-      val tyRes =
-        if (_tyRes.alias.contains(ty.argSym)) _tyRes.substAlias(ty.argSym, x)
-        else _tyRes
+      val tyRes = _tyRes.subst(ty.argSym, x)
 
       // The function is in the form f(x:#) => # ^^{f}
       val _appEff = ty.eff.subst(ty.funSym, f)

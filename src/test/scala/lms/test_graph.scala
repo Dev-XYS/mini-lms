@@ -174,8 +174,13 @@ class GraphTests extends FunSuite {
 
   test("pair encoding") {
     val snippet = new Snippet {
-      val tySelect = FrontendLambda(tv, FrontendLambda(tv, tv, FrontendTracked(Set(RefArg(0))), emptyEffect), FrontendTracked(Set()), emptyEffect)
-      val tyPair = FrontendLambda(tySelect, tv, FrontendTracked(Set()), emptyEffect)
+      val tySelect = FrontendLambda(
+        tv,
+        FrontendLambda(tv, FrontendValue(FrontendTracked(Set(RefArg(0), RefArg(1)))), FrontendTracked(Set(RefArg(0))), emptyEffect),
+        FrontendTracked(Set()),
+        emptyEffect
+      )
+      val tyPair = FrontendLambda(tySelect, FrontendValue(FrontendTracked(Set(RefFun(0)))), FrontendTracked(Set()), emptyEffect)
 
       def main(world: Rep) = {
         val pair = fun() { (a: Rep) =>
@@ -215,6 +220,20 @@ class GraphTests extends FunSuite {
         val p = f()
         free(fst(p))
         free(snd(p))
+      }
+    }
+
+    println(snippet.graph)
+  }
+
+  test("fst") {
+    val snippet = new Snippet {
+      def main(world: Rep) = {
+        val fst = fun() { (a: Rep) => // fst: x1, a: x2
+          fun() { (b: Rep) => // x3, b: x4
+            a
+          } // type: x3(x4:#^{x4} => #^{x2})^{x2}
+        } // type: x1(x2:#^{x2} => x3(x4:#^{x4} => #^{x2})^{x2})^{}
       }
     }
 
