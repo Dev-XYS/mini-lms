@@ -6,7 +6,10 @@ abstract class Snippet extends Frontend {
 
   def main(x: Rep): Rep
 
-  lazy val graph = getGraph(main)
+  lazy val graph = {
+    fun() { main }
+    getGraph()
+  }
 }
 
 class GraphTests extends FunSuite {

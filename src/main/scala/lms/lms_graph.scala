@@ -29,14 +29,14 @@ object Backend {
   // order symbols by the size of scope (de Bruijn levels)
   implicit val orderingSym: Ordering[Sym] = Ordering.by(s => if (s.isFunLevel) -s.n else 0)
 
-  def qualifierSetCompareLte(s1: Set[Sym], s2: Set[Sym]) = {
+  def qualifierSetCompareLte(s1: Set[Sym], s2: Set[Sym]): Boolean = {
     if (s1.isEmpty) true
     else {
       if (s2.isEmpty) false
       else {
-        s1.max <= s2.max &&
-        ((s2.max.isFunLevel) ||
-          (s1.filter(!_.isFunLevel) subsetOf s2.filter(!_.isFunLevel)))
+        val s = s2.head
+        if (s.isFunLevel) qualifierSetCompareLte(s1.filter(x => x.n < s.n), s2 - s)
+        else qualifierSetCompareLte(s1 - s, s2 - s)
       }
     }
   }
@@ -72,7 +72,7 @@ object Backend {
   }
 
   case class Tracked(aliases: Set[Sym]) extends Alias {
-    override def toString = s"^{${aliases.mkString(" ")}}"
+    override def toString = s"^{${aliases.toList.sortBy(_.n).mkString(" ")}}"
 
     def tracked = true
     def aliasSet = aliases
@@ -207,7 +207,12 @@ object Backend {
   }
 
   case class Dependency(hdeps: Map[Sym, Set[Sym]], sdeps: Map[Sym, Set[Sym]]) {
-    override def toString = s"hard: {${hdeps.mkString(" ")}}, soft: {${sdeps.mkString(" ")}}"
+    override def toString = {
+      def depToString(x: (Sym, Set[Sym])) = {
+        s"${x._1} -> {${x._2.mkString(" ")}}"
+      }
+      s"hard: {${hdeps.toList.sortBy(_._1.n).map(depToString).mkString(" ")}}, soft: {${sdeps.toList.sortBy(_._1.n).map(depToString).mkString(" ")}}"
+    }
   }
 
   object Dependency {
@@ -217,7 +222,7 @@ object Backend {
   }
 
   case class EffectSummary(read: Set[Sym], write: Set[Sym], kill: Set[Sym]) {
-    override def toString = s"read: [${read.mkString(" ")}], write: [${write.mkString(" ")}], kill: [${kill.mkString(" ")}]"
+    override def toString = s"read: [${read.toList.sortBy(_.n).mkString(" ")}], write: [${write.toList.sortBy(_.n).mkString(" ")}], kill: [${kill.toList.sortBy(_.n).mkString(" ")}]"
 
     def mergeWith(eff: EffectSummary) =
       EffectSummary(
@@ -257,7 +262,7 @@ object Backend {
 
   def EmptyEffect = EffectSummary(Set(), Set(), Set())
 
-  case class Graph(nodes: List[Node], block: Block) {
+  case class Graph(nodes: List[Node]) {
     override def toString = {
       val source = new java.io.ByteArrayOutputStream()
       val stream = new java.io.PrintStream(source)
@@ -265,8 +270,6 @@ object Backend {
       for (node <- nodes)
         if (node.op != "(arg)") // symbolic arguments should not be printed
           stream.println(node)
-      stream.println("--------------------")
-      stream.println(block)
       stream.println("====================")
       source.toString
     }
@@ -447,15 +450,12 @@ class GraphBuilder {
     val res = mutable.Set[Sym]()
     def helper(set: Set[Sym]) {
       for (x <- set) {
-        if (x.isInstanceOf[Sym]) {
-          val s = x.asInstanceOf[Sym]
-          if (!(res contains s)) {
-            res += s
-            val _node = getNode(s)
-            _node match {
-              case Some(node) => helper(node.ty.alias.aliasSet)
-              case _          =>
-            }
+        if (!(res contains x)) {
+          res += x
+          val _node = getNode(x)
+          _node match {
+            case Some(node) => helper(node.ty.alias.aliasSet)
+            case _          =>
           }
         }
       }
@@ -491,10 +491,8 @@ class Frontend {
 
   // user-accessible functions
 
-  def getGraph(f: Sym => Sym) = {
-    val x = g.freshSym // always assume one tracked argument for now
-    val block = g.reify(f, x, TyValue(Tracked(Set(x))))
-    Graph(g.globalDefs.toList, block)
+  def getGraph() = {
+    Graph(g.globalDefs.toList)
   }
 
   // program constructs
@@ -646,9 +644,10 @@ class Frontend {
     val s = g.freshSym
     val x = g.freshSym // symbol for the argument
 
+    // todo: needs to check that `_tyArg` is well-formed
     var tyArg = convertType(_tyArg)
 
-    // needs further checking: if the argument is a tracked value, it must track itself
+    // if the argument is a tracked value, it must track itself
     tyArg =
       if (tyArg.isInstanceOf[TyValue] && tyArg.tracked) tyArg.withAdditionalAlias(Set(x))
       else tyArg
@@ -657,7 +656,7 @@ class Frontend {
     g.globalDefs += Node(x, "(arg)", List(), tyArg, Dependency(Map(), Map()))
 
     val block = g.reify(f, x, tyArg)
-    val tyRes = g.getNode(block.res.asInstanceOf[Sym]).get.ty
+    val tyRes = g.getNode(block.res).get.ty
 
     val tyResRewired = g.leavingScope(tyRes, block.defined)
 
@@ -671,7 +670,7 @@ class Frontend {
         block.in(0),
         tyArg,
         tyResRewired,
-        Tracked(usedNonlocal ++ (if (usedNonlocal.isEmpty) Set() else Set(s))),
+        if (usedNonlocal.isEmpty) Untracked else Tracked(usedNonlocal + s),
         lamEff
       )
     )(Set())(EmptyEffect)
@@ -680,10 +679,10 @@ class Frontend {
   implicit class Lambda(f: Sym) {
     def apply(x: Sym) = {
       val s = g.freshSym
-      val node = g.getNode(f.asInstanceOf[Sym]).get
+      val node = g.getNode(f).get
       val ty = node.ty.asInstanceOf[TyLambda]
 
-      val actualType = toDeBruijn(g.getNode(x.asInstanceOf[Sym]).get.ty).intersectAliasWith(node.ty.alias)
+      val actualType = toDeBruijn(g.getNode(x).get.ty).intersectAliasWith(node.ty.alias)
       val requiredType = toDeBruijn(ty.arg)
 
       if (!(actualType isSubtypeOf requiredType)) {
@@ -691,7 +690,7 @@ class Frontend {
       }
 
       // The function is in the form f(x:#) => #^{f}.
-      // replace `f` in the alias set of result with the function symbol (not sure)
+      // replace `f` in the alias set of result with the function symbol
       val _tyRes = ty.res.subst(ty.funSym, f)
 
       // The function is in the form f(x:#) => #^{x}.
@@ -707,7 +706,7 @@ class Frontend {
       // reflect
       // (If an application returns a tracked value, it must at least alias itself.)
       // (really?)
-      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f))(appEff)
+      g.reflect(s, "@", f, x)(if (tyRes.tracked) tyRes.withAdditionalAlias(Set(s)) else tyRes)(Set(f, x))(appEff)
     }
   }
 }
